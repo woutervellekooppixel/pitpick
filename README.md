@@ -20,7 +20,7 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
     - a photo at screen size takes about 35-50 ms
     - a 100% focus check takes about 85 ms
     - a grid thumbnail takes 3-6 ms
-  - It preloads in the direction you browse. Up to about 15 photos per second, every frame is already sharp when you land on it.
+  - It preloads in the direction you browse. In tests at 8 photos per second every frame was already sharp when it appeared; at 15 per second, 31 of 33 were.
 - **Ingest.** Put both cards in, drag them onto the window and fill in the job.
   - Everything is copied to `<ingest folder>/<job folder>/raw`, with folder and file names built from your metadata.
   - You can start culling while it is still copying.
