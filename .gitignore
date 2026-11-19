@@ -1,0 +1,5 @@
+build/
+dist/
+AGENTS.md
+*.snelkeus
+.DS_Store
