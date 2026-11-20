@@ -109,6 +109,8 @@ final class Session: ObservableObject {
     @Published var lastCopyFolder: URL?
     @Published var scopeTagged = true
     @Published var ingesting = false
+    /// Asks the panel to open (and scroll to) the metadata template, for a pinned field that is still empty.
+    @Published var openTemplate = false
 
     var currentPhoto: Photo? { visible.indices.contains(currentIndex) ? visible[currentIndex] : nil }
 

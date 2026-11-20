@@ -23,7 +23,8 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
   - It preloads in the direction you browse. In tests at 8 photos per second every frame was already sharp when it appeared; at 15 per second, 31 of 33 were.
 - **Ingest.** Put both cards in, drag them onto the window and fill in the job.
   - Everything is copied to `<ingest folder>/<job folder>/raw`, with folder and file names built from your metadata.
-  - You can start culling while it is still copying.
+  - Both cards copy at the same time, each from its own reader, like Photo Mechanic. The XMP is written alongside, so the ingest runs at the speed of your card readers.
+  - You can start culling while it is still copying. Photos appear in shooting order.
   - Run it again and it continues where it stopped. Nothing is copied twice.
   - If two files would get the same name, the second one gets `-2`.
 - **Names that sort.** By default every file is named after the moment it was taken, the job and the photographer:
@@ -31,7 +32,7 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
   - The date and time come from the camera, so the files of both bodies sort in shooting order.
   - Frames shot in the same second get `-2`, `-3`.
   - Spaces become dashes ("Ziggo Dome" becomes "Ziggo-Dome"). You can turn that off.
-  - Fill in the **Photographer** field once and pin it.
+  - Fill in the **Photographer** field once, under **Metadata template** at the bottom of the panel. It stays for every job. If it is empty, Pitpick says so before it names anything.
 - **Cull.**
   - `T` tags. It is the same XMP tag Photo Mechanic uses, so the two apps read each other's tags.
   - `1`-`5` set stars and `6`-`9` set colour labels, Lightroom style.
@@ -121,6 +122,7 @@ Self test, run on copies of your own files in a temporary folder:
 ```sh
 build/Pitpick.app/Contents/MacOS/Pitpick --selftest /path/to/folder/with/CR3s
 build/Pitpick.app/Contents/MacOS/Pitpick --bench /path/to/folder
+build/Pitpick.app/Contents/MacOS/Pitpick --bench-ingest /tmp/ingest-test /Volumes/CARD1 /Volumes/CARD2
 ```
 
 ## Credits

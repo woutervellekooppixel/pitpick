@@ -302,6 +302,30 @@ enum SelfTest {
 }
 
 enum Bench {
+    /// --bench-ingest <dest> <card> [card...]: ingests the cards twice, without and with XMP, and prints the time.
+    static func ingest(_ args: [String]) -> Int32 {
+        guard args.count >= 2 else { print("usage: --bench-ingest <dest> <card> [card...]"); return 2 }
+        let dest = URL(fileURLWithPath: args[0])
+        let sources = Scanner.load(Scanner.group(Scanner.collectFiles(args.dropFirst().map { URL(fileURLWithPath: $0) }))) { _ in }
+        var v = SelfTest.examplePad()
+        v.fileTemplate = PadValues().fileTemplate
+        v.spacesToDashes = true
+        for (label, withXMP) in [("copy only", false), ("copy + XMP", true)] {
+            let d = dest.appendingPathComponent(withXMP ? "with-xmp" : "copy-only")
+            let t0 = nowMs()
+            var order: [Int] = []
+            let r = FileOps.ingest(sources, to: d, name: { p, n in v.fileName(photo: p, seq: n) },
+                                   metadata: withXMP ? { p in v.metadataArgs(photo: p, seq: 1) + Metadata.stateArgs(p, labelNames: v.labelNames) } : nil,
+                                   cancelled: { false }, onPhoto: { order.append($0.id) })
+            let dt = nowMs() - t0
+            let streams = Set(sources.map { FileOps.volumeKey($0.url) }).count
+            print("\(label): \(streams) card(s) at once, handed over in capture order: \(order == order.sorted() && order.count == sources.count)")
+            print("\(label): \(r.copied) photos, \(String(format: "%.2f", Double(r.bytes) / 1e9)) GB in \(ms(dt)), \(String(format: "%.0f", Double(r.bytes) / 1e6 / (dt / 1000))) MB/s, \(String(format: "%.1f", dt / Double(max(1, r.copied)))) ms per photo")
+        }
+        ExifTool.shared.stop()
+        return 0
+    }
+
     static func run(_ args: [String]) -> Int32 {
         let urls = args.map { URL(fileURLWithPath: $0) }
         var t0 = nowMs()

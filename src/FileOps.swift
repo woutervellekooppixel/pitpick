@@ -34,12 +34,17 @@ enum FileOps {
     // MARK: ingest
 
     /// Copies every photo (with its JPG twin and any existing XMP) into `dest`, under its new name,
-    /// and writes the metadata right after each copy. `onPhoto` receives the copy as soon as it is ready,
-    /// so culling can start while the rest is still copying. A file that is already there with the same
-    /// size counts as ingested before (resume); a different file with the same name gets -2, -3.
+    /// and writes the metadata right after each copy.
+    ///
+    /// Speed: every card (volume) gets its own copy stream, so two cards in two readers copy at the same
+    /// time, like Photo Mechanic. All names are planned first, in capture order, so the streams can never
+    /// claim the same name. The XMP is written on a separate queue, so copying never waits for exiftool.
+    /// `onPhoto` receives the copies in capture order as soon as all earlier photos are in, so culling can
+    /// start while the rest is still copying. A file that is already there with the same size counts as
+    /// ingested before (resume); a different file with the same name gets -2, -3.
     static func ingest(_ sources: [Photo], to dest: URL, name: (Photo, Int) -> String,
                        metadata: ((Photo) -> [String])?, cancelled: () -> Bool,
-                       onPhoto: (Photo) -> Void) -> IngestResult {
+                       onPhoto: @escaping (Photo) -> Void) -> IngestResult {
         let fm = FileManager.default
         var r = IngestResult()
         do {
@@ -48,9 +53,20 @@ enum FileOps {
             r.errors.append("Cannot create \(dest.path): \(error.localizedDescription)")
             return r
         }
+
+        // 1. Plan every target name, in capture order.
+        struct Job {
+            let index: Int
+            let src: Photo
+            let main: URL
+            let side: URL?
+            let comps: [URL]
+            let reuse: Bool
+            let suffixed: Bool
+        }
+        var jobs: [Job] = []
         var claimed = Set<String>()
         for (i, src) in sources.enumerated() {
-            if cancelled() { break }
             let base = safeFileName(name(src, i + 1))
             let ext = src.url.pathExtension.lowercased()
             let size = fileSize(src.url)
@@ -72,48 +88,96 @@ enum FileOps {
             claimed.insert(main.path.lowercased())
             if let s = side { claimed.insert(s.path.lowercased()) }
             comps.forEach { claimed.insert($0.path.lowercased()) }
-
-            if reuse {
-                // copied in an earlier run: show it as it is, with its own XMP
-                r.alreadyThere += 1
-                let xmp = side.flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
-                let g = Scanner.Group(dir: dest, raw: src.kind == .embedded ? nil : main,
-                                      images: src.kind == .embedded ? [main] + comps : comps, xmp: xmp)
-                if let p = Scanner.makePhoto(id: i, g) { onPhoto(p) }
-                continue
-            }
-            if b != base { r.suffixed += 1 }
-            do {
-                try fm.copyItem(at: src.url, to: main)
-                for (c, t) in zip(src.companions, comps) where !fm.fileExists(atPath: t.path) { try fm.copyItem(at: c, to: t) }
-                if let s = src.sidecar, let t = side, fm.fileExists(atPath: s.path), !fm.fileExists(atPath: t.path) {
-                    try fm.copyItem(at: s, to: t)
-                }
-            } catch {
-                r.errors.append("\(src.name): \(error.localizedDescription)")
-                continue
-            }
-            r.copied += 1
-            r.bytes += max(0, size)
-            let p = Photo(id: i, url: main, kind: src.kind, cr3: src.cr3, captureDate: src.captureDate,
-                          orientation: src.orientation, companions: comps)
-            p.tagged = src.tagged
-            p.rating = src.rating
-            p.label = src.label
-            p.originalFileName = src.originalFileName
-            if let s = side, fm.fileExists(atPath: s.path) { p.sidecar = s }
-            if let args = metadata?(p) {
-                let res = ExifTool.shared.run([["-overwrite_original"] + args + [p.metadataTarget.path]])
-                if res.first?.ok == true {
-                    if p.kind != .embedded { p.sidecar = p.metadataTarget }
-                    p.hasStoredOriginal = true
-                } else {
-                    r.errors.append("\(main.lastPathComponent): metadata: \(res.first?.text ?? "?")")
-                }
-            }
-            onPhoto(p)
+            jobs.append(Job(index: i, src: src, main: main, side: side, comps: comps, reuse: reuse, suffixed: b != base))
         }
+
+        // 2. Metadata and hand-over on one serial queue. A photo is handed over once every earlier one is,
+        //    so the grid fills in capture order even when one card is ahead of the other.
+        let lock = NSLock()
+        let after = DispatchQueue(label: "nl.wouter.pitpick.ingest", qos: .userInitiated)
+        var ready: [Int: Photo?] = [:]
+        var next = 0
+        func handOver(_ index: Int, _ photo: Photo?) {   // runs on `after`
+            ready[index] = .some(photo)
+            while let entry = ready[next] {
+                ready.removeValue(forKey: next)
+                if let p = entry { onPhoto(p) }
+                next += 1
+            }
+        }
+        func note(_ change: (inout IngestResult) -> Void) { lock.lock(); change(&r); lock.unlock() }
+
+        // 3. One copy stream per card, all at the same time; each card in capture order.
+        var byVolume: [String: [Job]] = [:]
+        var volumeOrder: [String] = []
+        for job in jobs {
+            let key = volumeKey(job.src.url)
+            if byVolume[key] == nil { volumeOrder.append(key) }
+            byVolume[key, default: []].append(job)
+        }
+        let streams = volumeOrder.map { byVolume[$0]! }
+        DispatchQueue.concurrentPerform(iterations: streams.count) { s in
+            for job in streams[s] {
+                if cancelled() { break }
+                let src = job.src
+                if job.reuse {
+                    // copied in an earlier run: show it as it is, with its own XMP
+                    note { $0.alreadyThere += 1 }
+                    let xmp = job.side.flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
+                    let g = Scanner.Group(dir: dest, raw: src.kind == .embedded ? nil : job.main,
+                                          images: src.kind == .embedded ? [job.main] + job.comps : job.comps, xmp: xmp)
+                    let p = Scanner.makePhoto(id: job.index, g)
+                    after.async { handOver(job.index, p) }
+                    continue
+                }
+                do {
+                    try fm.copyItem(at: src.url, to: job.main)
+                    for (c, t) in zip(src.companions, job.comps) where !fm.fileExists(atPath: t.path) { try fm.copyItem(at: c, to: t) }
+                    if let sc = src.sidecar, let t = job.side, fm.fileExists(atPath: sc.path), !fm.fileExists(atPath: t.path) {
+                        try fm.copyItem(at: sc, to: t)
+                    }
+                } catch {
+                    note { $0.errors.append("\(src.name): \(error.localizedDescription)") }
+                    after.async { handOver(job.index, nil) }
+                    continue
+                }
+                let size = max(0, fileSize(job.main))
+                note { $0.copied += 1; $0.bytes += size; if job.suffixed { $0.suffixed += 1 } }
+                let p = Photo(id: job.index, url: job.main, kind: src.kind, cr3: src.cr3, captureDate: src.captureDate,
+                              orientation: src.orientation, companions: job.comps)
+                p.captureZone = src.captureZone
+                p.tagged = src.tagged
+                p.rating = src.rating
+                p.label = src.label
+                p.originalFileName = src.originalFileName
+                if let sd = job.side, fm.fileExists(atPath: sd.path) { p.sidecar = sd }
+                let args = metadata?(p)
+                after.async {
+                    if let args = args {
+                        let res = ExifTool.shared.run([["-overwrite_original"] + args + [p.metadataTarget.path]])
+                        if res.first?.ok == true {
+                            if p.kind != .embedded { p.sidecar = p.metadataTarget }
+                            p.hasStoredOriginal = true
+                        } else {
+                            note { $0.errors.append("\(job.main.lastPathComponent): metadata: \(res.first?.text ?? "?")") }
+                        }
+                    }
+                    handOver(job.index, p)
+                }
+            }
+        }
+        // Stopped early or a photo failed: hand over whatever is still waiting, in order.
+        after.sync {
+            for k in ready.keys.sorted() { if let p = ready[k] ?? nil { onPhoto(p) } }
+            ready.removeAll()
+        }
+        lock.lock(); defer { lock.unlock() }
         return r
+    }
+
+    /// The volume a file is on: one copy stream per card.
+    static func volumeKey(_ u: URL) -> String {
+        (try? u.resourceValues(forKeys: [.volumeURLKey]).volume?.path) ?? "/"
     }
 
     // MARK: rename

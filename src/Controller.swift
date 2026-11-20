@@ -381,7 +381,13 @@ final class Controller: NSObject, NSWindowDelegate {
     private func namesReady(_ templates: [String]) -> Bool {
         let missing = pad.v.emptyReferences(in: templates)
         if missing.isEmpty { return true }
-        session.message = "Fill in \(missing.joined(separator: ", ")) first: the names are built from it."
+        var text = "Fill in \(missing.joined(separator: ", ")) first: the names are built from it."
+        let pinnedMissing = missing.filter { label in Fields.all.contains { $0.label == label && pad.pinned.contains($0.key) } }
+        if !pinnedMissing.isEmpty {
+            text += " You find \(pinnedMissing.joined(separator: ", ")) under Metadata template, at the bottom of this panel."
+            session.openTemplate = true
+        }
+        session.message = text
         return false
     }
 

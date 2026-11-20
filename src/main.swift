@@ -7,6 +7,7 @@ setvbuf(stdout, nil, _IOLBF, 0)
 let launchArgs = CommandLine.arguments
 if let i = launchArgs.firstIndex(of: "--selftest") { exit(SelfTest.run(Array(launchArgs[(i + 1)...]))) }
 if let i = launchArgs.firstIndex(of: "--bench") { exit(Bench.run(Array(launchArgs[(i + 1)...]))) }
+if let i = launchArgs.firstIndex(of: "--bench-ingest") { exit(Bench.ingest(Array(launchArgs[(i + 1)...]))) }
 
 extension Controller {
     @objc func menuOpen(_ sender: Any?) { chooseFolder() }

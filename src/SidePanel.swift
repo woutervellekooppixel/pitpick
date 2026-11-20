@@ -10,6 +10,7 @@ struct SidePanel: View {
     @State private var showTemplate = false
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
@@ -27,13 +28,21 @@ struct SidePanel: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 templateSection
+                    .id("template")
                 legend
             }
             .padding(16)
+            .onChange(of: session.openTemplate) { _, open in
+                guard open else { return }
+                session.openTemplate = false
+                showTemplate = true
+                withAnimation { proxy.scrollTo("template", anchor: .top) }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(white: 0.105))
         .environment(\.colorScheme, .dark)
+        }
     }
 
     // MARK: building blocks
