@@ -257,12 +257,15 @@ struct SidePanel: View {
                 Divider().padding(.vertical, 4)
                 templateRow("File name", $pad.v.fileTemplate)
                 templateRow("Folder name", $pad.v.folderTemplate)
+                Toggle("Spaces become dashes in names", isOn: $pad.v.spacesToDashes)
+                    .toggleStyle(.checkbox)
+                    .help("Ziggo Dome becomes Ziggo-Dome in folder and file names")
                 templateRow("Ingest subfolder", $pad.v.rawFolder)
                 templateRow("Lightroom colour label names", $pad.v.labels)
                 templateRow("Read-only folders (separate with ;)", Binding(
                     get: { pad.readOnlyFolders.joined(separator: "; ") },
                     set: { pad.readOnlyFolders = $0.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }))
-                preview("Tokens: {event} {location} {city} or any field name, {date} {date-dmy} {year} {month} {day}, {frame} (camera frame number), {filename} (camera file name), {seq}.")
+                preview("Tokens: {event} {location} {city} {photographer} or any field name, {shootdate} and {time} (when the photo was taken, 21-04-37), {date} {date-dmy} {year} {month} {day} (the job date), {frame} (camera frame number), {filename} (camera file name), {seq}.")
                 HStack(spacing: 8) {
                     Button("Load preset…") { controller.chooseImportPreset() }
                     Button("Save preset…") { controller.chooseExportPreset() }

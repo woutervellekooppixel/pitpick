@@ -137,7 +137,7 @@ final class ImagePipeline {
         thumbQueue.qualityOfService = .userInitiated
         for i in 0..<2 {
             let t = Thread { [unowned self] in self.workerLoop() }
-            t.name = "snelkeus-decode-\(i)"
+            t.name = "pitpick-decode-\(i)"
             t.qualityOfService = .userInteractive
             t.start()
         }

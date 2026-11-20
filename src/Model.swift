@@ -42,6 +42,8 @@ final class Photo {
     let kind: FileKind
     let cr3: CR3Info?
     let captureDate: Date
+    /// The camera's time zone when the file records it (OffsetTime); otherwise the Mac's.
+    var captureZone: TimeZone?
     let orientation: Int
     var tagged = false
     var rating = 0
@@ -61,6 +63,15 @@ final class Photo {
     }
 
     var name: String { url.lastPathComponent }
+
+    /// Date and time on the camera's clock, for {shootdate} (2026-11-19) and {time} (21-04-37).
+    var shootDate: String { let c = captureParts; return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0) }
+    var shootTime: String { let c = captureParts; return String(format: "%02d-%02d-%02d", c.hour ?? 0, c.minute ?? 0, c.second ?? 0) }
+    private var captureParts: DateComponents {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = captureZone ?? .current
+        return cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: captureDate)
+    }
     var ref: SourceRef { SourceRef(id: id, url: url, kind: kind, cr3: cr3) }
     var originalBase: String { (originalFileName as NSString).deletingPathExtension }
 

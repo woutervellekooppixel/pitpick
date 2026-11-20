@@ -1,4 +1,4 @@
-// Snelkeus: fast culling, IPTC metadata and renaming. Nothing else.
+// Pitpick (formerly Snelkeus): fast culling, IPTC metadata and renaming. Nothing else.
 import AppKit
 
 signal(SIGPIPE, SIG_IGN)
@@ -33,14 +33,14 @@ enum Menus {
     static func build(_ c: Controller) -> NSMenu {
         let bar = NSMenu()
 
-        let app = NSMenu(title: "Snelkeus")
-        app.addItem(item("About Snelkeus", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "", nil))
+        let app = NSMenu(title: "Pitpick")
+        app.addItem(item("About Pitpick", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "", nil))
         app.addItem(.separator())
-        app.addItem(item("Hide Snelkeus", #selector(NSApplication.hide(_:)), "h", nil))
+        app.addItem(item("Hide Pitpick", #selector(NSApplication.hide(_:)), "h", nil))
         app.addItem(item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", nil, [.command, .option]))
         app.addItem(item("Show All", #selector(NSApplication.unhideAllApplications(_:)), "", nil))
         app.addItem(.separator())
-        app.addItem(item("Quit Snelkeus", #selector(NSApplication.terminate(_:)), "q", nil))
+        app.addItem(item("Quit Pitpick", #selector(NSApplication.terminate(_:)), "q", nil))
 
         let file = NSMenu(title: "File")
         file.addItem(item("Open Folder…", #selector(Controller.menuOpen(_:)), "o", c))
@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingOpen: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Migration.fromSnelkeus()
         let c = Controller()
         controller = c
         c.buildWindow()

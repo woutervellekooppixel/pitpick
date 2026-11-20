@@ -38,11 +38,14 @@ enum SelfTest {
         v.values["usageterms"] = "No use without permission."
         v.values["webstatement"] = "example.com"
         v.date = "2025-11-29"
+        // The rename, copy and ingest tests use a simple fixed name; the default is tested separately.
+        v.fileTemplate = "{date}_{event}-{location}_{filename}"
+        v.spacesToDashes = false
         return v
     }
 
     static func run(_ args: [String]) -> Int32 {
-        guard let dir = args.first else { print("usage: --selftest <folder with CR3s> [lightroom.xmp] [preset.snelkeus]"); return 2 }
+        guard let dir = args.first else { print("usage: --selftest <folder with CR3s> [lightroom.xmp] [preset.pitpick]"); return 2 }
         let fm = FileManager.default
         let src = URL(fileURLWithPath: dir)
         let lrXMP = args.count > 1 && args[1] != "-" ? URL(fileURLWithPath: args[1]) : nil
@@ -78,9 +81,27 @@ enum SelfTest {
         check(v.value("headline") == "Frenna at Ziggo Dome Amsterdam", "headline: \(v.value("headline"))")
         check(v.value("caption") == "Frenna, Ziggo Dome, Amsterdam, on 29-11-2025. Photo by Jane Doe", "caption: \(v.value("caption"))")
         check(v.list("keywords") == ["Frenna", "Ziggo Dome", "Amsterdam", "Jane Doe"], "keywords: \(v.list("keywords").joined(separator: "; "))")
-        let camera = Photo(id: 99, url: URL(fileURLWithPath: "/tmp/_V1_3777.CR3"), kind: .cr3, cr3: nil, captureDate: Date(), orientation: 1, companions: [])
-        check(v.fileName(photo: camera, seq: 1) == "2025-11-29_Frenna-Ziggo Dome__V1_3777", "default file name: \(v.fileName(photo: camera, seq: 1))")
-        check(v.folderName == "2025-11-29_Frenna-Ziggo Dome", "folder name: \(v.folderName)")
+        let shot = ExifDate.parse("2025:11:29 21:04:37", subSec: "48", offset: "+01:00") ?? Date()
+        let camera = Photo(id: 99, url: URL(fileURLWithPath: "/tmp/_V1_3777.CR3"), kind: .cr3, cr3: nil, captureDate: shot, orientation: 1, companions: [])
+        camera.captureZone = ExifDate.timeZone(from: "+01:00")
+        check(v.fileName(photo: camera, seq: 1) == "2025-11-29_Frenna-Ziggo Dome__V1_3777", "fixed test name: \(v.fileName(photo: camera, seq: 1))")
+        check(v.folderName == "2025-11-29_Frenna-Ziggo Dome", "folder name with spaces kept: \(v.folderName)")
+        var d = examplePad()
+        d.fileTemplate = PadValues().fileTemplate
+        d.spacesToDashes = true
+        check(d.fileName(photo: camera, seq: 1) == "2025-11-29_21-04-37_Frenna-Ziggo-Dome-Amsterdam_Jane-Doe", "default file name: \(d.fileName(photo: camera, seq: 1))")
+        check(d.folderName == "2025-11-29_Frenna-Ziggo-Dome", "default folder name: \(d.folderName)")
+        var dash = d
+        dash.values["event"] = "Piano Man - Jeroen van den Boom"
+        check(dash.folderName == "2025-11-29_Piano-Man-Jeroen-van-den-Boom-Ziggo-Dome", "' - ' becomes one dash: \(dash.folderName)")
+        var noName = d
+        noName.values["creator"] = ""
+        check(noName.emptyReferences(in: [noName.fileTemplate]) == ["Photographer"], "a missing photographer name is caught")
+        check(PadValues.tokens(in: "{Photographer}") == ["creator"], "{photographer} is the IPTC Creator field")
+        let nyShot = ExifDate.parse("2025:11:30 00:12:05", subSec: nil, offset: "-05:00") ?? Date()
+        let ny = Photo(id: 98, url: URL(fileURLWithPath: "/tmp/_V1_0001.CR3"), kind: .cr3, cr3: nil, captureDate: nyShot, orientation: 1, companions: [])
+        ny.captureZone = ExifDate.timeZone(from: "-05:00")
+        check(ny.shootDate == "2025-11-30" && ny.shootTime == "00-12-05", "shoot date and time follow the camera clock: \(ny.shootDate) \(ny.shootTime)")
         var empty = v
         empty.values["location"] = ""
         check(empty.emptyReferences(in: [empty.fileTemplate]) == ["Location"], "empty field in a name is caught")
@@ -95,11 +116,11 @@ enum SelfTest {
             check(w.value("headline") == "Frenna at Ziggo Dome Amsterdam", "preset headline equals the archive")
             check(w.value("caption") == "Frenna, Ziggo Dome, Amsterdam, on 29-11-2025. Photo by Wouter Vellekoop", "preset caption equals the archive")
             check(w.list("keywords").joined(separator: "; ") == "concert; live music; stage; lights; music photography; Frenna; Ziggo Dome; Amsterdam; Wouter Vellekoop", "preset keywords equal the archive")
-            check(w.fileName(photo: camera, seq: 1) + ".cr3" == "2025-11-29_Frenna-Ziggo Dome_Wouter-Vellekoop__V1_3777.cr3", "preset file name equals the archive: \(w.fileName(photo: camera, seq: 1))")
+            check(w.fileName(photo: camera, seq: 1) + ".cr3" == "2025-11-29_21-04-37_Frenna-Ziggo-Dome-Amsterdam_Wouter-Vellekoop.cr3", "preset file name: \(w.fileName(photo: camera, seq: 1))")
         }
 
         // working folder with copies under camera names
-        let work = fm.temporaryDirectory.appendingPathComponent("snelkeus-test-\(UUID().uuidString.prefix(6))")
+        let work = fm.temporaryDirectory.appendingPathComponent("pitpick-test-\(UUID().uuidString.prefix(6))")
         let card = work.appendingPathComponent("card/DCIM/100EOSR5")
         try? fm.createDirectory(at: card, withIntermediateDirectories: true)
         var picks = [portraitIndex ?? 0]
@@ -119,6 +140,10 @@ enum SelfTest {
         check(photos.count == 3, "card read: \(photos.count) photos in \(ms(nowMs() - t0))")
         check(photos.first?.orientation == 8, "sorted by capture time (James Arthur 24-11 first)")
         guard photos.count == 3 else { return 1 }
+        if let dto = CR3.read(photos[0].url)?.dateTimeOriginal {
+            let exifStamp = dto.replacingOccurrences(of: ":", with: "-").replacingOccurrences(of: " ", with: "_")
+            check(photos[0].shootDate + "_" + photos[0].shootTime == exifStamp, "shoot date and time equal the camera's EXIF (\(exifStamp))")
+        }
 
         // 5. tag, stars, label into new XMPs
         let writer = StateWriter()
@@ -199,6 +224,17 @@ enum SelfTest {
         } else {
             check(false, "rename log")
         }
+
+        // 8b. two frames in the same second get -2 with the default name (planned only)
+        let burst = work.appendingPathComponent("burst")
+        try? fm.createDirectory(at: burst, withIntermediateDirectories: true)
+        try? fm.copyItem(at: files[picks[0]], to: burst.appendingPathComponent("_V1_2001.CR3"))
+        try? fm.copyItem(at: files[picks[0]], to: burst.appendingPathComponent("_V1_2002.CR3"))
+        let pair = Scanner.load(Scanner.group(Scanner.collectFiles([burst]))) { _ in }
+        let burstPlan = FileOps.planRename(pair) { p, n in d.fileName(photo: p, seq: n) }
+        let burstNames = burstPlan.items.map { $0.main.deletingPathExtension().lastPathComponent }.sorted()
+        let stem = pair.first.map { d.fileName(photo: $0, seq: 1) } ?? "?"
+        check(burstNames == [stem, stem + "-2"].sorted(), "same second: \(burstNames.joined(separator: ", "))")
 
         // 9. copy with new names and metadata, never overwrite
         photos = Scanner.load(Scanner.group(Scanner.collectFiles([work.appendingPathComponent("card")]))) { _ in }

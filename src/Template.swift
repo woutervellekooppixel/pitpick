@@ -14,7 +14,7 @@ struct FieldDef {
 }
 
 enum Fields {
-    // Generic defaults. Personal values (name, copyright, own templates) live in a preset (.snelkeus file).
+    // Generic defaults. Personal values (name, copyright, own templates) live in a preset (.pitpick file).
     static let all: [FieldDef] = [
         FieldDef(key: "event", label: "Event", tag: "XMP-iptcExt:Event", xmp: "Iptc4xmpExt:Event", list: false, initial: "", pinnedByDefault: false),
         FieldDef(key: "location", label: "Location", tag: "XMP-iptcCore:Location", xmp: "Iptc4xmpCore:Location", list: false, initial: "", pinnedByDefault: false),
@@ -23,17 +23,17 @@ enum Fields {
         FieldDef(key: "headline", label: "Headline", tag: "XMP-photoshop:Headline", xmp: "photoshop:Headline", list: false,
                  initial: "{event} at {location} {city}", pinnedByDefault: true),
         FieldDef(key: "caption", label: "Caption", tag: "XMP-dc:Description", xmp: "dc:description", list: false,
-                 initial: "{event}, {location}, {city}, on {date-dmy}. Photo by {creator}", pinnedByDefault: true),
+                 initial: "{event}, {location}, {city}, on {date-dmy}. Photo by {photographer}", pinnedByDefault: true),
         FieldDef(key: "keywords", label: "Keywords", tag: "XMP-dc:Subject", xmp: "dc:subject", list: true,
-                 initial: "{event}; {location}; {city}; {creator}", pinnedByDefault: true),
+                 initial: "{event}; {location}; {city}; {photographer}", pinnedByDefault: true),
         FieldDef(key: "title", label: "Title", tag: "XMP-dc:Title", xmp: "dc:title", list: false, initial: "", pinnedByDefault: true),
         FieldDef(key: "state", label: "State", tag: "XMP-photoshop:State", xmp: "photoshop:State", list: false, initial: "", pinnedByDefault: true),
         FieldDef(key: "country", label: "Country", tag: "XMP-photoshop:Country", xmp: "photoshop:Country", list: false, initial: "", pinnedByDefault: true),
         FieldDef(key: "countrycode", label: "Country code", tag: "XMP-iptcCore:CountryCode", xmp: "Iptc4xmpCore:CountryCode", list: false, initial: "", pinnedByDefault: true),
-        FieldDef(key: "creator", label: "Creator", tag: "XMP-dc:Creator", xmp: "dc:creator", list: true, initial: "", pinnedByDefault: true),
-        FieldDef(key: "credit", label: "Credit line", tag: "XMP-photoshop:Credit", xmp: "photoshop:Credit", list: false, initial: "© {creator}", pinnedByDefault: true),
+        FieldDef(key: "creator", label: "Photographer", tag: "XMP-dc:Creator", xmp: "dc:creator", list: true, initial: "", pinnedByDefault: true),
+        FieldDef(key: "credit", label: "Credit line", tag: "XMP-photoshop:Credit", xmp: "photoshop:Credit", list: false, initial: "© {photographer}", pinnedByDefault: true),
         FieldDef(key: "source", label: "Source", tag: "XMP-photoshop:Source", xmp: "photoshop:Source", list: false, initial: "", pinnedByDefault: true),
-        FieldDef(key: "copyright", label: "Copyright", tag: "XMP-dc:Rights", xmp: "dc:rights", list: false, initial: "© {creator}", pinnedByDefault: true),
+        FieldDef(key: "copyright", label: "Copyright", tag: "XMP-dc:Rights", xmp: "dc:rights", list: false, initial: "© {photographer}", pinnedByDefault: true),
         FieldDef(key: "usageterms", label: "Usage terms", tag: "XMP-xmpRights:UsageTerms", xmp: "xmpRights:UsageTerms", list: false,
                  initial: "", pinnedByDefault: true),
         FieldDef(key: "webstatement", label: "Web statement", tag: "XMP-xmpRights:WebStatement", xmp: "xmpRights:WebStatement", list: false,
@@ -44,15 +44,16 @@ enum Fields {
 
     static let byKey: [String: FieldDef] = Dictionary(uniqueKeysWithValues: all.map { ($0.key, $0) })
 
-    /// Old Dutch token names from version 1 keep working.
+    /// Other names for the same tokens: {photographer} is the IPTC Creator field, and the old Dutch names from version 1 keep working.
     static let aliases: [String: String] = [
+        "photographer": "creator", "shoot-date": "shootdate",
         "artiest": "event", "artist": "event", "zaal": "location", "venue": "location", "stad": "city",
         "datum": "date", "datum-nl": "date-dmy", "framenr": "frame", "bestandsnaam": "filename",
         "volgnr": "seq", "jaar": "year", "description": "caption",
     ]
 
     static let dateTokens: Set<String> = ["date", "date-dmy", "year", "month", "day"]
-    static let photoTokens: Set<String> = ["frame", "filename", "seq"]
+    static let photoTokens: Set<String> = ["frame", "filename", "seq", "shootdate", "time"]
 }
 
 /// Everything the pad holds, as a plain value: safe to hand to a background thread.
@@ -60,9 +61,11 @@ struct PadValues: Codable, Equatable {
     var values: [String: String] = Dictionary(uniqueKeysWithValues: Fields.all.map { ($0.key, $0.initial) })
     var date = ""
     var folderTemplate = "{date}_{event}-{location}"
-    var fileTemplate = "{date}_{event}-{location}_{filename}"
+    var fileTemplate = "{shootdate}_{time}_{event}-{location}-{city}_{photographer}"
     var rawFolder = "raw"
     var labels = "Red, Yellow, Green, Blue, Purple"
+    /// Spaces in folder and file names become dashes: "Ziggo Dome" -> "Ziggo-Dome".
+    var spacesToDashes = true
 
     init() {}
 
@@ -77,6 +80,7 @@ struct PadValues: Codable, Equatable {
         fileTemplate = try c.decodeIfPresent(String.self, forKey: .fileTemplate) ?? d.fileTemplate
         rawFolder = try c.decodeIfPresent(String.self, forKey: .rawFolder) ?? d.rawFolder
         labels = try c.decodeIfPresent(String.self, forKey: .labels) ?? d.labels
+        spacesToDashes = try c.decodeIfPresent(Bool.self, forKey: .spacesToDashes) ?? d.spacesToDashes
     }
 
     /// Lightroom label names in the order red, yellow, green, blue, purple.
@@ -123,6 +127,8 @@ struct PadValues: Codable, Equatable {
         case "frame": return photo?.frameNumber ?? "3777"
         case "filename": return photo?.originalBase ?? "IMG_3777"
         case "seq": return String(format: "%04d", seq)
+        case "shootdate": return photo?.shootDate ?? (date.isEmpty ? "2026-11-19" : date)
+        case "time": return photo?.shootTime ?? "21-04-37"
         default:
             guard Fields.byKey[name] != nil, depth < 4 else { return nil }
             return resolve(values[name] ?? "", photo: photo, seq: seq, depth: depth + 1)
@@ -145,8 +151,16 @@ struct PadValues: Codable, Equatable {
         return out
     }
 
-    func fileName(photo: Photo?, seq: Int) -> String { safeFileName(resolve(fileTemplate, photo: photo, seq: seq)) }
-    var folderName: String { safeFileName(resolve(folderTemplate)) }
+    func fileName(photo: Photo?, seq: Int) -> String { tidy(resolve(fileTemplate, photo: photo, seq: seq)) }
+    var folderName: String { tidy(resolve(folderTemplate)) }
+
+    /// A safe name; with the option on, spaces become dashes ("Piano Man - Jeroen" -> "Piano-Man-Jeroen").
+    func tidy(_ s: String) -> String {
+        let clean = safeFileName(s)
+        guard spacesToDashes else { return clean }
+        return clean.replacingOccurrences(of: #"\s*-\s*"#, with: "-", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: "-", options: .regularExpression)
+    }
 
     /// exiftool arguments for every field that has a value. Empty fields are left alone.
     func metadataArgs(photo: Photo?, seq: Int) -> [String] {
@@ -217,7 +231,7 @@ final class Pad: ObservableObject {
     @Published var ingestRoot: String { didSet { defaults.set(ingestRoot, forKey: "pad.ingestRoot") } }
     @Published var copyRoot: String { didSet { defaults.set(copyRoot, forKey: "pad.copyRoot") } }
     @Published var copyFolderOverride = ""
-    /// Folders where Snelkeus never writes (for example an archive drive). View and copy only.
+    /// Folders where Pitpick never writes (for example an archive drive). View and copy only.
     @Published var readOnlyFolders: [String] { didSet { defaults.set(readOnlyFolders, forKey: "pad.readOnly") } }
     @Published private(set) var venues: [String: String]
     private var venueNames: [String: String]
@@ -320,7 +334,7 @@ final class Pad: ObservableObject {
         return safeFileName(o.isEmpty ? v.folderName : o)
     }
 
-    // MARK: presets (.snelkeus files): the whole pad, the pins and the known locations
+    // MARK: presets (.pitpick files; old .snelkeus files load too): the whole pad, the pins and the known locations
 
     struct Preset: Codable {
         var pad: PadValues

@@ -3,19 +3,19 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Snelkeus</string>
+    <string>Pitpick</string>
     <key>CFBundleDisplayName</key>
-    <string>Snelkeus</string>
+    <string>Pitpick</string>
     <key>CFBundleIdentifier</key>
-    <string>nl.wouter.snelkeus</string>
+    <string>nl.wouter.pitpick</string>
     <key>CFBundleExecutable</key>
-    <string>Snelkeus</string>
+    <string>Pitpick</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1</string>
+    <string>1.2</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>3</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSApplicationCategoryType</key>
@@ -27,15 +27,15 @@
     <key>NSHumanReadableCopyright</key>
     <string>Free and open source. By Wouter Vellekoop.</string>
     <key>NSRemovableVolumesUsageDescription</key>
-    <string>Snelkeus reads your photos from the memory card.</string>
+    <string>Pitpick reads your photos from the memory card.</string>
     <key>NSNetworkVolumesUsageDescription</key>
-    <string>Snelkeus reads photos from your network drive.</string>
+    <string>Pitpick reads photos from your network drive.</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>Snelkeus reads photos from this folder.</string>
+    <string>Pitpick reads photos from this folder.</string>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>Snelkeus reads photos from this folder.</string>
+    <string>Pitpick reads photos from this folder.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>Snelkeus reads photos from this folder.</string>
+    <string>Pitpick reads photos from this folder.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -53,13 +53,14 @@
         </dict>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>Snelkeus preset</string>
+            <string>Pitpick preset</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
             <string>Owner</string>
             <key>CFBundleTypeExtensions</key>
             <array>
+                <string>pitpick</string>
                 <string>snelkeus</string>
             </array>
         </dict>

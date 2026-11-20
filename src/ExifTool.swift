@@ -1,5 +1,5 @@
 // One exiftool process that keeps running (-stay_open), so every write takes milliseconds.
-// Snelkeus only writes XMP: a .xmp next to a raw, inside the file for JPG/DNG/HEIC.
+// Pitpick only writes XMP: a .xmp next to a raw, inside the file for JPG/DNG/HEIC.
 import Foundation
 
 final class ExifTool {
@@ -10,7 +10,7 @@ final class ExifTool {
         let text: String
     }
 
-    private let queue = DispatchQueue(label: "nl.wouter.snelkeus.exiftool", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "nl.wouter.pitpick.exiftool", qos: .userInitiated)
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?

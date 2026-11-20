@@ -1,19 +1,19 @@
 #!/bin/zsh
-# Builds Snelkeus.app (Apple Silicon + Intel) with exiftool bundled, and puts a zip in dist/.
+# Builds Pitpick.app (Apple Silicon + Intel) with exiftool bundled, and puts a zip in dist/.
 # Quick build for this Mac only: ./build.sh quick
 set -e
 cd "$(dirname "$0")"
-APP=build/Snelkeus.app
+APP=build/Pitpick.app
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
 
 if [[ "$1" == "quick" ]]; then
-  swiftc -O -target arm64-apple-macos14 -o "$APP/Contents/MacOS/Snelkeus" src/*.swift
+  swiftc -O -target arm64-apple-macos14 -o "$APP/Contents/MacOS/Pitpick" src/*.swift
 else
-  swiftc -O -target arm64-apple-macos14 -o build/Snelkeus-arm64 src/*.swift
-  swiftc -O -target x86_64-apple-macos14 -o build/Snelkeus-x86_64 src/*.swift
-  lipo -create build/Snelkeus-arm64 build/Snelkeus-x86_64 -output "$APP/Contents/MacOS/Snelkeus"
-  rm build/Snelkeus-arm64 build/Snelkeus-x86_64
+  swiftc -O -target arm64-apple-macos14 -o build/Pitpick-arm64 src/*.swift
+  swiftc -O -target x86_64-apple-macos14 -o build/Pitpick-x86_64 src/*.swift
+  lipo -create build/Pitpick-arm64 build/Pitpick-x86_64 -output "$APP/Contents/MacOS/Pitpick"
+  rm build/Pitpick-arm64 build/Pitpick-x86_64
 fi
 cp app/Info.plist "$APP/Contents/"
 
@@ -30,6 +30,6 @@ else
 fi
 
 codesign --force --deep --sign - "$APP"
-rm -f dist/Snelkeus.zip
-ditto -c -k --keepParent "$APP" dist/Snelkeus.zip
-echo "Done: $APP and dist/Snelkeus.zip ($(du -h dist/Snelkeus.zip | cut -f1))"
+rm -f dist/Pitpick.zip
+ditto -c -k --keepParent "$APP" dist/Pitpick.zip
+echo "Done: $APP and dist/Pitpick.zip ($(du -h dist/Pitpick.zip | cut -f1))"

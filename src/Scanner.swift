@@ -99,21 +99,24 @@ enum Scanner {
             kind = .embedded
         }
         var date: Date?
+        var zone: TimeZone?
         var orientation = 1
         var cr3: CR3Info?
         if kind == .cr3, let info = CR3.read(main) {
             cr3 = info
             orientation = info.orientation
             date = ExifDate.parse(info.dateTimeOriginal, subSec: info.subSec, offset: info.offsetTime)
+            zone = info.offsetTime.flatMap(ExifDate.timeZone(from:))
         } else {
             if kind == .cr3 { kind = .raw }
-            date = imageIODate(main)
+            if let r = imageIODate(main) { date = r.date; zone = r.zone }
         }
         if date == nil {
             date = (try? main.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         }
         let photo = Photo(id: id, url: main, kind: kind, cr3: cr3, captureDate: date ?? Date.distantPast,
                           orientation: orientation, companions: companions)
+        photo.captureZone = zone
         var xmp: String?
         if kind == .embedded {
             xmp = embeddedXMP(main)
@@ -125,13 +128,15 @@ enum Scanner {
         return photo
     }
 
-    static func imageIODate(_ url: URL) -> Date? {
+    static func imageIODate(_ url: URL) -> (date: Date, zone: TimeZone?)? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] else { return nil }
-        return ExifDate.parse(exif[kCGImagePropertyExifDateTimeOriginal] as? String,
-                              subSec: exif[kCGImagePropertyExifSubsecTimeOriginal] as? String,
-                              offset: exif[kCGImagePropertyExifOffsetTimeOriginal] as? String)
+        let offset = exif[kCGImagePropertyExifOffsetTimeOriginal] as? String
+        guard let d = ExifDate.parse(exif[kCGImagePropertyExifDateTimeOriginal] as? String,
+                                     subSec: exif[kCGImagePropertyExifSubsecTimeOriginal] as? String,
+                                     offset: offset) else { return nil }
+        return (d, offset.flatMap(ExifDate.timeZone(from:)))
     }
 
     static func embeddedXMP(_ url: URL) -> String? {
@@ -142,7 +147,7 @@ enum Scanner {
     }
 }
 
-/// Reads tag, stars, label and the original file name from XMP text (Photo Mechanic, Lightroom, Snelkeus).
+/// Reads tag, stars, label and the original file name from XMP text (Photo Mechanic, Lightroom, Pitpick).
 enum XMPState {
     static let rating = try! NSRegularExpression(pattern: #"(?:xmp|xap):Rating(?:\s*=\s*["']|>)\s*(-?\d+)"#)
     static let label = try! NSRegularExpression(pattern: #"(?:xmp|xap):Label(?:\s*=\s*["']|>)([^"'<]*)"#)

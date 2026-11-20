@@ -88,7 +88,7 @@ final class Controller: NSObject, NSWindowDelegate {
         let frame = NSRect(x: 0, y: 0, width: 1460, height: 900)
         window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "Snelkeus"
+        window.title = "Pitpick"
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = .black
         window.minSize = NSSize(width: 820, height: 520)
@@ -100,8 +100,8 @@ final class Controller: NSObject, NSWindowDelegate {
         let panel = NSHostingView(rootView: SidePanel(session: session, pad: pad, controller: self))
         main.setPanel(panel)
         window.contentView = main
-        window.setFrameAutosaveName("Snelkeus.window")
-        if !window.setFrameUsingName("Snelkeus.window") { window.center() }
+        window.setFrameAutosaveName("Pitpick.window")
+        if !window.setFrameUsingName("Pitpick.window") { window.center() }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(main.grid)
     }
@@ -135,11 +135,11 @@ final class Controller: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Folders open; .snelkeus files are presets.
+    /// Folders open; .pitpick (and old .snelkeus) files are presets.
     func openOrImport(_ urls: [URL]) {
-        let presets = urls.filter { $0.pathExtension.lowercased() == "snelkeus" }
+        let presets = urls.filter { Controller.presetExtensions.contains($0.pathExtension.lowercased()) }
         for u in presets { importPreset(from: u) }
-        let rest = urls.filter { $0.pathExtension.lowercased() != "snelkeus" }
+        let rest = urls.filter { !Controller.presetExtensions.contains($0.pathExtension.lowercased()) }
         if !rest.isEmpty { open(rest) }
     }
 
@@ -153,7 +153,7 @@ final class Controller: NSObject, NSWindowDelegate {
         applyMode()
         main.grid.relayout()
         let title = roots.map { $0.lastPathComponent }.joined(separator: " + ")
-        window.title = "Snelkeus - \(title)"
+        window.title = "Pitpick - \(title)"
         session.title = title
         let start = nowMs()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -176,7 +176,7 @@ final class Controller: NSObject, NSWindowDelegate {
         session.loading = nil
         session.readOnly = roots.contains { pad.isReadOnly($0.path) }
         writer.enabled = !session.readOnly
-        let firstDay = photos.first.map { ExifDate.dayFormatter.string(from: $0.captureDate) } ?? ""
+        let firstDay = photos.first.map { $0.shootDate } ?? ""
         pad.open(folderKey: roots.map(\.path).joined(separator: "|"), firstDay: firstDay) {
             guard let p = photos.first else { return nil }
             if p.kind == .embedded { return Scanner.embeddedXMP(p.url) }
@@ -367,7 +367,7 @@ final class Controller: NSObject, NSWindowDelegate {
     private func writable(_ what: String) -> Bool {
         if session.busy != nil { return false }
         if session.readOnly {
-            session.message = "This folder is set as read-only, so Snelkeus writes nothing here. Copy the selection to another folder first."
+            session.message = "This folder is set as read-only, so Pitpick writes nothing here. Copy the selection to another folder first."
             return false
         }
         if !ExifTool.shared.isAvailable {
@@ -482,7 +482,7 @@ final class Controller: NSObject, NSWindowDelegate {
         p.canChooseFiles = false
         p.canCreateDirectories = true
         p.prompt = "Choose"
-        p.message = "Where do your job folders go? Snelkeus creates <job folder>/\(pad.v.rawFolder) in here."
+        p.message = "Where do your job folders go? Pitpick creates <job folder>/\(pad.v.rawFolder) in here."
         if !pad.ingestRoot.isEmpty { p.directoryURL = URL(fileURLWithPath: pad.ingestRoot) }
         p.beginSheetModal(for: window) { [weak self] r in
             if r == .OK, let u = p.url {
@@ -536,7 +536,7 @@ final class Controller: NSObject, NSWindowDelegate {
         pipeline.reset()
         session.setPhotos([], roots: [dest])
         session.title = "\(dest.deletingLastPathComponent().lastPathComponent)/\(dest.lastPathComponent)"
-        window.title = "Snelkeus - \(session.title)"
+        window.title = "Pitpick - \(session.title)"
         session.readOnly = false
         writer.enabled = true
         pad.continueJob(in: dest.path)
@@ -656,13 +656,16 @@ final class Controller: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Preset files; .snelkeus is the name from before Pitpick was renamed.
+    static let presetExtensions = ["pitpick", "snelkeus"]
+
     func chooseImportPreset() {
         let p = NSOpenPanel()
         p.canChooseFiles = true
         p.canChooseDirectories = false
-        p.allowedContentTypes = [UTType(filenameExtension: "snelkeus") ?? .json, .json]
+        p.allowedContentTypes = Controller.presetExtensions.compactMap { UTType(filenameExtension: $0) } + [.json]
         p.prompt = "Load"
-        p.message = "Load a Snelkeus preset (.snelkeus)"
+        p.message = "Load a Pitpick preset (.pitpick)"
         p.beginSheetModal(for: window) { [weak self] r in
             if r == .OK, let u = p.url { self?.importPreset(from: u) }
         }
@@ -671,7 +674,7 @@ final class Controller: NSObject, NSWindowDelegate {
     func chooseExportPreset() {
         guard let data = pad.exportPreset() else { return }
         let p = NSSavePanel()
-        p.nameFieldStringValue = "My metadata.snelkeus"
+        p.nameFieldStringValue = "My metadata.pitpick"
         p.message = "Save the metadata template, pins and known locations as a preset"
         p.beginSheetModal(for: window) { [weak self] r in
             guard r == .OK, let u = p.url else { return }

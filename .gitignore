@@ -2,4 +2,5 @@ build/
 dist/
 AGENTS.md
 *.snelkeus
+*.pitpick
 .DS_Store

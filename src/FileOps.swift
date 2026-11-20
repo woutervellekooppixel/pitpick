@@ -24,7 +24,7 @@ struct IngestResult {
 enum FileOps {
     static var logDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("Snelkeus/renames", isDirectory: true)
+        return base.appendingPathComponent("Pitpick/renames", isDirectory: true)
     }
 
     static func fileSize(_ u: URL) -> Int64 {
@@ -164,12 +164,12 @@ enum FileOps {
         let fm = FileManager.default
         if from.path.lowercased() == to.path.lowercased() {
             // only the case differs: go through a temporary name
-            let tmp = from.deletingLastPathComponent().appendingPathComponent(".snelkeus-\(UUID().uuidString)")
+            let tmp = from.deletingLastPathComponent().appendingPathComponent(".pitpick-\(UUID().uuidString)")
             try fm.moveItem(at: from, to: tmp)
             try fm.moveItem(at: tmp, to: to)
         } else {
             if fm.fileExists(atPath: to.path) {
-                throw NSError(domain: "Snelkeus", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(to.lastPathComponent) already exists"])
+                throw NSError(domain: "Pitpick", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(to.lastPathComponent) already exists"])
             }
             try fm.moveItem(at: from, to: to)
         }
