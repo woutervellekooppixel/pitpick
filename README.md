@@ -1,3 +1,5 @@
+<img src="docs/icon.png" width="128" alt="Pitpick app icon: a rock hand between two crop marks">
+
 # Pitpick
 
 **Fast culling, IPTC metadata and renaming for photographers on macOS. Nothing else.**

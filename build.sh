@@ -16,6 +16,7 @@ else
   rm build/Pitpick-arm64 build/Pitpick-x86_64
 fi
 cp app/Info.plist "$APP/Contents/"
+cp app/AppIcon.icns "$APP/Contents/Resources/"
 
 # Bundle exiftool (Phil Harvey); it runs on the perl that ships with macOS.
 # Set EXIFTOOL_DIR if yours is not the Homebrew one.
