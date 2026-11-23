@@ -4,6 +4,7 @@ import SwiftUI
 struct SidePanel: View {
     @ObservedObject var session: Session
     @ObservedObject var pad: Pad
+    @ObservedObject var cards: CardWatcher
     let controller: Controller
     @State private var copyRename = true
     @State private var copyMetadata = true
@@ -14,6 +15,7 @@ struct SidePanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                if !cards.cards.isEmpty { cardsSection }
                 if session.readOnly { banner }
                 if let b = session.busy { busy(b) }
                 jobSection
@@ -122,8 +124,8 @@ struct SidePanel: View {
     }
 
     private var banner: some View {
-        Text(session.lockedVolume
-             ? "Locked card: Pitpick writes nothing on it. Tags, stars and labels stay in Pitpick and go along with the ingest."
+        Text(session.onCard || session.lockedVolume
+             ? "On the card: Pitpick writes nothing on it. Tags, stars and labels stay in Pitpick and go along with the ingest."
              : "Read-only folder: view and copy only. Tags are not saved here.")
             .font(.system(size: 12))
             .padding(8)
@@ -137,6 +139,36 @@ struct SidePanel: View {
             Text(b).font(.system(size: 12)).foregroundStyle(.secondary)
             Spacer()
             if session.ingesting { Button("Stop") { controller.stopIngest() } }
+        }
+    }
+
+    private func cardDetail(_ c: Card) -> String {
+        let gb = String(format: "%.1f GB", Double(c.usedBytes) / 1_000_000_000)
+        let photos = c.photos.map { "\($0) photo\($0 == 1 ? "" : "s")" } ?? "counting…"
+        return photos + " · " + gb + (c.locked ? " · locked" : "")
+    }
+
+    /// Cards that are in: checked when they go in. View = cull on the card, Ingest = copy them first.
+    private var cardsSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            title("Cards")
+            ForEach(cards.cards) { c in
+                HStack(spacing: 6) {
+                    Toggle(isOn: Binding(get: { c.checked }, set: { cards.setChecked(c.id, $0) })) {
+                        Text(c.name).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                    }
+                    .toggleStyle(.checkbox)
+                    Spacer(minLength: 4)
+                    Text(cardDetail(c)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            HStack(spacing: 8) {
+                Button("View") { controller.viewCards() }
+                    .help("Look at the checked cards here, on the card. Pitpick writes nothing on them.")
+                Button("Ingest") { controller.ingestCards() }
+                    .help("Copy the checked cards to your ingest folder, named and with metadata. You can cull while it copies.")
+            }
+            .disabled(cards.checked.isEmpty || session.busy != nil)
         }
     }
 

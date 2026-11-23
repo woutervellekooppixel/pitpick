@@ -102,6 +102,8 @@ final class Session: ObservableObject {
     @Published var readOnly = false
     /// The open card or disk is locked (read-only volume), as opposed to a folder set as read-only.
     @Published var lockedVolume = false
+    /// The open folders are on a memory card: Pitpick writes nothing there, tags go along with the ingest.
+    @Published var onCard = false
     @Published var loading: String?
     @Published var busy: String?
     @Published var message: String?
@@ -121,6 +123,7 @@ final class Session: ObservableObject {
         self.roots = roots
         onlyTagged = false
         lockedVolume = false
+        onCard = false
         currentIndex = 0
         lastRenameLog = nil
         message = nil

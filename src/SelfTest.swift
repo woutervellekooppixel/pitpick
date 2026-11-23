@@ -362,6 +362,9 @@ enum SelfTest {
                   "tag, stars and label read back from inside a JPG")
         }
 
+        // 10d. a folder on the Mac's own disk is not a memory card (so tags are saved there)
+        check(!CardWatcher.isOnCard(work) && !CardWatcher.isCard(URL(fileURLWithPath: "/")), "the Mac's own disk is not taken for a memory card")
+
         // 11. presets survive a round trip
         if let d = try? JSONEncoder().encode(Pad.Preset(pad: v, pinned: ["headline", "caption"], venues: ["Ziggo Dome": "Amsterdam"], readOnly: ["/Volumes/Archive"])),
            let back = try? JSONDecoder().decode(Pad.Preset.self, from: d) {

@@ -121,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let c = controller, !c.leavingCardIsOK("Quit") { return .terminateCancel }
         controller?.writer.flush(wait: true)
         ExifTool.shared.stop()
         return .terminateNow

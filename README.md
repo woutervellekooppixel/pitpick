@@ -24,7 +24,10 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
     - 100% is there at once when you have looked at a photo for a moment, and in about 65 ms when you zoom straight away
     - zoomed in, the next photo is already at 100% when you get there, so you can compare focus across a burst
   - It preloads in the direction you browse. On Apple Silicon it decodes with the Mac's hardware JPEG decoder and, at the same time, with [libjpeg-turbo](https://libjpeg-turbo.org) on the other cores. In tests at 25 photos per second every frame was sharp when it appeared; at 40 per second, 32 of 33 were. If you go even faster, you see the camera's own preview (1620 px) until the sharp image lands, never a blank screen.
-- **Ingest.** Put both cards in, drag them onto the window and fill in the job.
+- **Cards.** Put your cards in and Pitpick lists them at the top of the panel, checked, with the number of photos on each.
+  - **View** opens the checked cards together, in shooting order, so you can cull right on the cards. Pitpick writes nothing on a card: your tags, stars and labels stay in Pitpick and go along with the ingest. It asks before you would lose them.
+  - **Ingest** copies the checked cards straight away.
+- **Ingest.** Put both cards in, press Ingest (or drag them onto the window) and fill in the job.
   - Everything is copied to `<ingest folder>/<job folder>/raw`, with folder and file names built from your metadata.
   - Both cards copy at the same time, each from its own reader, like Photo Mechanic. The XMP is written alongside, so the ingest runs at the speed of your card readers.
   - You can start culling while it is still copying. Photos appear in shooting order.
@@ -108,6 +111,8 @@ curl -fsSL https://github.com/woutervellekooppixel/pitpick/releases/latest/downl
 2. The app is not notarized by Apple. The first time you open it, macOS blocks it: open System Settings > Privacy & Security and click **Open Anyway**.
 
 You need macOS 14 or later, on Apple Silicon or Intel. ExifTool is included.
+
+After an update, macOS may ask once more whether Pitpick may read your memory cards. The app is not notarized, so macOS treats every version as a new app.
 
 Coming from Snelkeus? Pitpick takes over its settings and rename history on the first start.
 

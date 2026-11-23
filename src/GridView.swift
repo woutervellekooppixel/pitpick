@@ -96,7 +96,11 @@ final class GridView: NSView {
     private func drawEmpty(_ c: Controller) {
         let text: String
         if let l = c.session.loading { text = l }
-        else if c.session.roots.isEmpty { text = "Drop a folder or memory card here, or choose File > Open Folder (⌘O)" }
+        else if c.session.roots.isEmpty {
+            text = c.cards.cards.isEmpty
+                ? "Put in a memory card, or drop a folder here (File > Open Folder, ⌘O)"
+                : "Your cards are at the top of the panel: View to look at them on the card, Ingest to copy them"
+        }
         else if c.session.ingesting { text = "Copying the first photos..." }
         else { text = c.session.onlyTagged ? "Nothing tagged yet. Press T to tag, ⌘T shows everything again." : "No photos found in this folder." }
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor(white: 0.6, alpha: 1)]

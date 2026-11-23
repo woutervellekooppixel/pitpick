@@ -68,10 +68,15 @@ final class Controller: NSObject, NSWindowDelegate {
     let pad = Pad()
     let pipeline = ImagePipeline()
     let writer = StateWriter()
+    let cards = CardWatcher()
     var window: NSWindow!
     var main: MainView!
     private var direction = 1
     private var ingestCancelled = false
+    /// Runs once the folders being opened are read (Ingest on the card list).
+    private var afterLoad: (() -> Void)?
+    /// The question about culling on a card was answered for this close or quit.
+    private var leavingConfirmed = false
 
     override init() {
         super.init()
@@ -98,17 +103,60 @@ final class Controller: NSObject, NSWindowDelegate {
         main.controller = self
         main.grid.controller = self
         main.loupe.controller = self
-        let panel = NSHostingView(rootView: SidePanel(session: session, pad: pad, controller: self))
+        let panel = NSHostingView(rootView: SidePanel(session: session, pad: pad, cards: cards, controller: self))
         main.setPanel(panel)
         window.contentView = main
         window.setFrameAutosaveName("Pitpick.window")
         if !window.setFrameUsingName("Pitpick.window") { window.center() }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(main.grid)
+        cards.start()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        leavingConfirmed = leavingCardIsOK("Close")
+        return leavingConfirmed
     }
 
     func windowWillClose(_ notification: Notification) {
         writer.flush(wait: true)
+    }
+
+    // MARK: memory cards
+
+    /// Photos on a card with a tag, stars or a label: these live only in Pitpick until the ingest.
+    var unsavedCardCulling: Int {
+        guard session.onCard || session.lockedVolume else { return 0 }
+        return session.photos.reduce(0) { $0 + ($1.tagged || $1.rating > 0 || $1.label != nil ? 1 : 0) }
+    }
+
+    /// Asks before tags, stars and labels set on a card would be lost (opening something else, closing, quitting).
+    func leavingCardIsOK(_ action: String) -> Bool {
+        if leavingConfirmed { return true }
+        let n = unsavedCardCulling
+        guard n > 0 else { return true }
+        return confirm("\(n) photo\(n == 1 ? " has" : "s have") a tag, stars or a label on the card",
+                       "Pitpick writes nothing on a card, so these stay in Pitpick until you ingest it. \(action) anyway and lose them?",
+                       action)
+    }
+
+    /// Opens the checked cards together, to look at them on the card.
+    func viewCards() {
+        let urls = cards.checked.map { $0.url }
+        guard !urls.isEmpty, session.busy == nil else { return }
+        open(urls)
+    }
+
+    /// Opens the checked cards (unless they already are open) and starts the ingest.
+    func ingestCards() {
+        let urls = cards.checked.map { $0.url }
+        guard !urls.isEmpty, session.busy == nil else { return }
+        let open = Set(session.roots.map { $0.standardizedFileURL.path })
+        if open == Set(urls.map { $0.path }) && session.loading == nil && !session.photos.isEmpty {
+            ingest()
+        } else {
+            self.open(urls) { [weak self] in self?.ingest() }
+        }
     }
 
     /// A blocking yes/no question. The screenshot test answers yes by itself.
@@ -144,7 +192,9 @@ final class Controller: NSObject, NSWindowDelegate {
         if !rest.isEmpty { open(rest) }
     }
 
-    func open(_ urls: [URL]) {
+    func open(_ urls: [URL], then: (() -> Void)? = nil) {
+        guard leavingCardIsOK("Open") else { return }
+        afterLoad = then
         writer.flush(wait: true)
         pipeline.reset()
         let roots = urls.map { $0.standardizedFileURL }
@@ -175,10 +225,11 @@ final class Controller: NSObject, NSWindowDelegate {
     private func loaded(_ photos: [Photo], roots: [URL], ms: Double) {
         session.setPhotos(photos, roots: roots)
         session.loading = nil
-        // A locked SD card (or any read-only volume) is treated like a read-only folder: tags stay in
-        // Pitpick and go along with the ingest, instead of an exiftool error for every key press.
+        // A memory card, or any locked disk, is treated like a read-only folder: Pitpick writes nothing there,
+        // tags stay in Pitpick and go along with the ingest (no exiftool error for every key press on a locked card).
         session.lockedVolume = roots.contains { (try? $0.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly == true }
-        session.readOnly = session.lockedVolume || roots.contains { pad.isReadOnly($0.path) }
+        session.onCard = roots.contains { CardWatcher.isOnCard($0) }
+        session.readOnly = session.onCard || session.lockedVolume || roots.contains { pad.isReadOnly($0.path) }
         writer.enabled = !session.readOnly
         let firstDay = photos.first.map { $0.shootDate } ?? ""
         pad.open(folderKey: roots.map(\.path).joined(separator: "|"), firstDay: firstDay) {
@@ -196,6 +247,11 @@ final class Controller: NSObject, NSWindowDelegate {
         NSDocumentController.shared.noteNewRecentDocumentURL(roots[0])
         // exiftool ready before the first tag or ingest; not during the first read, which it slowed by ~120 ms
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { ExifTool.shared.warmUp() }
+        if let next = afterLoad, !photos.isEmpty {
+            afterLoad = nil
+            next()
+        }
+        afterLoad = nil
     }
 
     func reopen() {
@@ -410,8 +466,8 @@ final class Controller: NSObject, NSWindowDelegate {
     private func writable(_ what: String) -> Bool {
         if session.busy != nil { return false }
         if session.readOnly {
-            session.message = session.lockedVolume
-                ? "This card is locked, so Pitpick writes nothing on it. Ingest it first: your tags, stars and labels go along."
+            session.message = session.onCard || session.lockedVolume
+                ? "Pitpick writes nothing on a card. Ingest it first: your tags, stars and labels go along."
                 : "This folder is set as read-only, so Pitpick writes nothing here. Copy the selection to another folder first."
             return false
         }
