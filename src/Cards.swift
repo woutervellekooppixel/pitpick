@@ -42,6 +42,12 @@ final class CardWatcher: ObservableObject {
         return FileManager.default.fileExists(atPath: volume.appendingPathComponent("DCIM").path, isDirectory: &isDir) && isDir.boolValue
     }
 
+    /// The card a folder or file is on (nil when it is not on a memory card).
+    static func cardVolume(of url: URL) -> URL? {
+        guard let volume = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume, isCard(volume) else { return nil }
+        return volume
+    }
+
     /// Whether a folder (a card, or a folder on it such as DCIM/100EOSR5) is on a memory card.
     static func isOnCard(_ folder: URL) -> Bool {
         guard let volume = (try? folder.resourceValues(forKeys: [.volumeURLKey]))?.volume else { return false }

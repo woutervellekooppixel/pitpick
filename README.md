@@ -27,29 +27,40 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
 - **Cards.** Put your cards in and Pitpick lists them at the top of the panel, checked, with the number of photos on each.
   - **View** opens the checked cards together, in shooting order, so you can cull right on the cards. Pitpick writes nothing on a card: your tags, stars and labels stay in Pitpick and go along with the ingest. It asks before you would lose them.
   - **Ingest** copies the checked cards straight away.
+  - A photo you protected in the camera shows a padlock and counts as tagged; stars given in the camera come along.
 - **Ingest.** Put both cards in, press Ingest (or drag them onto the window) and fill in the job.
   - Everything is copied to `<ingest folder>/<job folder>/raw`, with folder and file names built from your metadata.
   - Both cards copy at the same time, each from its own reader, like Photo Mechanic. The XMP is written alongside, so the ingest runs at the speed of your card readers.
   - You can start culling while it is still copying. Photos appear in shooting order.
   - Run it again and it continues where it stopped. Nothing is copied twice.
+  - **Incremental**, like Photo Mechanic: Pitpick remembers every photo it ingested. Put the same card in again after the encore, or the next day, and only the new photos are copied, also when the first copies were renamed or moved. That job simply continues.
+  - **Tagged and rated photos first**: protect or rate your best shots in the camera during the show, and they are on your Mac before the rest.
+  - **A second copy** on another disk while it ingests: the card is read once and written twice. **Check every copy against the card** reads each copy back from its disk and compares its SHA-256 with the card's, while the next photo comes off the card (about 4% slower).
+  - It can eject the cards when everything is in.
   - If two files would get the same name, the second one gets `-2`.
 - **Names that sort.** By default every file is named after the moment it was taken, the job, the photographer and the camera's frame number:
   `2026-11-19_21-04-37_Event-Location-City_Your-Name_3777.cr3`
-  - The date and time come from the camera, so the files of both bodies sort in shooting order.
+  - The date and time come from the camera, so the files of both bodies sort in shooting order. Is one body's clock off? The panel lists your bodies (by serial number): type a correction, or select two photos of the same moment and click **Same moment**.
   - The frame number at the end keeps frames shot in the same second in shooting order. If two files would still get the same name, the second one gets `-2`.
   - Spaces become dashes ("Ziggo Dome" becomes "Ziggo-Dome"). You can turn that off.
   - Fill in the **Photographer** field once, under **Metadata template** at the bottom of the panel. It stays for every job. If it is empty, Pitpick says so before it names anything.
 - **Cull.**
   - `T` tags. It is the same XMP tag Photo Mechanic uses, so the two apps read each other's tags.
-  - `1`-`5` set stars and `6`-`9` set colour labels, Lightroom style.
+  - `1`-`5` set stars and `6`-`9` set colour labels, Lightroom style. Optionally `T` also sets a colour label, for Lightroom, which does not read the tag.
+  - Shift-click, ⌘-click or ⌘A select several photos; a key then works on all of them. `⌘Z` undoes.
   - Return opens the loupe. Space, `Z` or a click shows 100%.
-  - `⌘T` shows only the tagged photos.
+  - `C` puts two to four photos side by side to pick the best of a burst: zoom and pan are linked.
+  - `⌘T` shows only the tagged photos; the stars and colour dots in the panel filter on stars and labels.
+  - With **Next photo after a tag** (or Caps Lock on) every key moves on to the next photo.
   - Photos from both bodies are merged in capture-time order.
+- **Deliver tonight.** Copy the selection as **Camera JPEG**: the JPEG your camera made, taken out of the raw in a millisecond, full size or 3000 or 2048 px, with the camera's EXIF, its colour profile and your caption. No Lightroom needed for the first photos.
 - **Open metadata.**
   - Every common IPTC field is there: event, location, city, person shown, headline, caption, keywords, photographer, credit, copyright, usage terms and more.
   - Any field can use tokens such as `{event}`, `{location}`, `{shootdate}` or the name of another field.
   - **Pin** the fields that stay the same for every job. Unpinned fields start empty for each new job.
   - Locations remember their city.
+  - `P` sets who is in one photo; `{personshown}` in the caption follows it.
+  - **Code replacements**, as in Photo Mechanic: a text file with a code and its text on each line. Type `\jb\` in any field and the metadata says James Bay.
   - Save the whole setup as a `.pitpick` preset and double-click it on another Mac. Older `.snelkeus` presets still load.
 - **Rename** with a template, and undo it if needed. **Copy the selection** to an archive folder with new names and metadata.
 - **Safe.**
@@ -57,6 +68,7 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
   - It never changes the image data of a raw, never overwrites a file and never deletes anything.
   - Copies are made under a temporary name and only get their real name when they are complete, so a power cut or a crash during an ingest never leaves a broken file under the real name.
   - Folders you mark as read-only (for example an archive drive) are view and copy only. A locked card is read-only too: your tags and stars stay in Pitpick and go along with the ingest.
+- **Your archive.** A folder on a network drive gets a small index on your Mac (nothing is written on the drive), so opening it again only reads what changed: a concert of 2,000 photos on a NAS reopens in a tenth of a second.
 - **Lightroom friendly.** Lightroom Classic reads the stars, colour labels and IPTC fields when you import. Rename before you import.
 
 ![Grid view](docs/grid.jpg)
@@ -68,11 +80,17 @@ Photo Mechanic is fast because it never renders the raw: it shows the JPEG the c
 | `T` | Tag / untag |
 | `1`-`5`, `0` | Stars, no stars |
 | `6` `7` `8` `9` | Red, yellow, green, blue label |
+| `⌘Z`, `⇧⌘Z` | Undo, redo a tag, stars or label |
 | `←` `→` (`↑` `↓` in the grid) | Browse |
+| Shift-click, ⌘-click, Shift-arrows, `⌘A` | Select several photos in the grid |
 | Return or double-click | Loupe, and back |
 | Space, `Z` or click | 100% at the mouse, drag to pan |
-| Esc | Out of 100%, back to the grid |
+| `C` | Compare the selected photos (or this one and the next) side by side |
+| `P` | Person shown in this photo |
+| Esc | Out of 100%, back to the grid, clear the selection |
 | `⌘T` | Tagged only |
+| `⌥⌘1`-`⌥⌘5`, `⌥⌘0` | At least that many stars, show all |
+| Caps Lock | Next photo after every tag, stars or label |
 | `⌘+` `⌘-` | Thumbnail size |
 | Tab | Show or hide the panel |
 

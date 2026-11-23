@@ -3,7 +3,7 @@
 // Track 1 holds the full-size camera JPEG, the PRVW box a 1620x1080 JPEG.
 import Foundation
 
-struct CR3Info {
+struct CR3Info: Codable {
     var jpegOffset: UInt64 = 0
     var jpegLength = 0
     var prvwOffset: UInt64 = 0
@@ -13,6 +13,14 @@ struct CR3Info {
     var dateTimeOriginal: String?
     var subSec: String?
     var offsetTime: String?
+    /// BodySerialNumber (Exif 0xA431): which camera body took the photo.
+    var serial: String?
+    /// Exif ColorSpace: 1 = sRGB, 65535 = uncalibrated (Adobe RGB on a Canon).
+    var colorSpace: Int?
+    /// Stars given in the camera (the XMP packet Canon puts in the CR3).
+    var rating: Int?
+    /// Protected in the camera.
+    var locked = false
 }
 
 struct ISOBox {
@@ -105,8 +113,11 @@ enum CR3 {
         return read(f)
     }
 
+    static let xmpUUID: [UInt8] = [0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3, 0xaf, 0xac]
+
     static func read(_ f: RAFile) -> CR3Info? {
         var info = CR3Info()
+        info.locked = f.flags & UInt32(UF_IMMUTABLE) != 0
         var p: UInt64 = 0
         var sawMoov = false
         var steps = 0
@@ -125,6 +136,8 @@ enum CR3 {
                 sawMoov = true
             } else if type == "uuid" && h.bytes(Int(header), 16) == previewUUID {
                 findPreview(f, p + header + 16, p + size, &info)
+            } else if type == "uuid" && h.bytes(Int(header), 16) == xmpUUID {
+                info.rating = cameraRating(f, p + header + 16, p + size)
             } else if type == "mdat" {
                 break
             }
@@ -133,6 +146,21 @@ enum CR3 {
         guard sawMoov, info.jpegLength > 0, info.jpegOffset > 0,
               info.jpegOffset + UInt64(info.jpegLength) <= f.size else { return nil }
         return info
+    }
+
+    /// <xmp:Rating>3</xmp:Rating> (or Rating="3") in the first few KB of the XMP box, right after moov.
+    private static func cameraRating(_ f: RAFile, _ start: UInt64, _ end: UInt64) -> Int? {
+        guard end > start, let b = f.read(start, Int(min(4096, end - start))),
+              let r = b.range(of: Data("Rating".utf8)) else { return nil }
+        var i = r.upperBound - b.startIndex
+        let skip: Set<UInt8> = [UInt8(ascii: ">"), UInt8(ascii: "="), UInt8(ascii: "\""), UInt8(ascii: "'"), UInt8(ascii: " ")]
+        while i < b.count && skip.contains(b.u8(i)) { i += 1 }
+        var negative = false
+        if b.u8(i) == UInt8(ascii: "-") { negative = true; i += 1 }
+        var v = 0, digits = 0
+        while i < b.count && digits < 2 && b.u8(i) >= 48 && b.u8(i) <= 57 { v = v * 10 + Int(b.u8(i) - 48); i += 1; digits += 1 }
+        guard digits > 0 else { return nil }
+        return negative ? -v : v
     }
 
     private static func findPreview(_ f: RAFile, _ start: UInt64, _ end: UInt64, _ info: inout CR3Info) {
@@ -164,6 +192,8 @@ enum CR3 {
                     case ("CMT2", 0x9003): info.dateTimeOriginal = t.string(e)
                     case ("CMT2", 0x9291): info.subSec = t.string(e)
                     case ("CMT2", 0x9011): info.offsetTime = t.string(e)
+                    case ("CMT2", 0xA431): info.serial = t.string(e)?.trimmingCharacters(in: .whitespaces)
+                    case ("CMT2", 0xA001): info.colorSpace = t.int(e)
                     default: break
                     }
                 }

@@ -362,6 +362,198 @@ enum SelfTest {
                   "tag, stars and label read back from inside a JPG")
         }
 
+        // 10e. incremental ingest: what was ingested before is skipped, also into another job folder
+        let incCard = work.appendingPathComponent("inccard/DCIM/100EOSR5")
+        try? fm.createDirectory(at: incCard, withIntermediateDirectories: true)
+        for (k, i) in files.indices.prefix(3).enumerated() { try? fm.copyItem(at: files[i], to: incCard.appendingPathComponent("_V1_900\(k).CR3")) }
+        let history = IngestHistory(file: work.appendingPathComponent("ingested.txt"))
+        let inc1 = Scanner.load(Scanner.group(Scanner.collectFiles([work.appendingPathComponent("inccard")]))) { _ in }
+        let ri = FileOps.ingest(inc1, to: work.appendingPathComponent("jobA/raw"), name: { p, n in v.fileName(photo: p, seq: n) }, metadata: nil,
+                                cancelled: { false }, history: history, onPhoto: { _ in })
+        let reread = IngestHistory(file: history.file)
+        check(ri.copied == 3 && reread.count == 3, "incremental ingest: 3 photos remembered (\(reread.count) in the history after a restart)")
+        check(inc1.filter { !reread.contains($0) }.isEmpty, "the same card again, into another job folder: nothing new to copy")
+        if files.count > 3 { try? fm.copyItem(at: files[3], to: incCard.appendingPathComponent("_V1_9003.CR3")) }
+        let inc2 = Scanner.load(Scanner.group(Scanner.collectFiles([work.appendingPathComponent("inccard")]))) { _ in }
+        let fresh = inc2.filter { !reread.contains($0) }
+        check(fresh.count == 1 && fresh.first?.name == "_V1_9003.CR3", "one new photo on the card: only that one is new (\(fresh.map { $0.name }.joined()))")
+
+        // 10g. protected in the camera: locked on the card, tagged when read from a card, copied first, and the copy is
+        //      not locked; stars given in the camera are read from the CR3
+        let protCard = work.appendingPathComponent("protcard/DCIM/100EOSR5")
+        try? fm.createDirectory(at: protCard, withIntermediateDirectories: true)
+        for (k, i) in files.indices.prefix(4).enumerated() { try? fm.copyItem(at: files[i], to: protCard.appendingPathComponent("_V1_950\(k).CR3")) }
+        let lockedFile = protCard.appendingPathComponent("_V1_9502.CR3")
+        let ratedFile = protCard.appendingPathComponent("_V1_9503.CR3")
+        var ratedOK = false
+        if let h = try? FileHandle(forUpdating: ratedFile), let head = try? h.read(upToCount: 300_000),
+           let r = head.range(of: Data("<xmp:Rating>0<".utf8)) {
+            try? h.seek(toOffset: UInt64(r.lowerBound + 12))
+            try? h.write(contentsOf: Data("4".utf8))
+            try? h.close()
+            ratedOK = true
+        }
+        chflags(lockedFile.path, UInt32(UF_IMMUTABLE))
+        let wasLockedIsTagged = Scanner.lockedIsTagged
+        Scanner.lockedIsTagged = true
+        let protGroups = Scanner.group(Scanner.collectFiles([work.appendingPathComponent("protcard")]))
+        let prot = Scanner.load(protGroups, onCard: true) { _ in }
+        let notCard = Scanner.load(protGroups) { _ in }
+        Scanner.lockedIsTagged = wasLockedIsTagged
+        let lp = prot.first { $0.name == "_V1_9502.CR3" }
+        check(lp?.locked == true && lp?.tagged == true && prot.filter { $0.tagged }.count == 1
+              && notCard.first { $0.name == "_V1_9502.CR3" }?.tagged == false,
+              "protected in the camera: locked, and tagged when read from a card (not elsewhere)")
+        check(ratedOK && prot.first { $0.name == "_V1_9503.CR3" }?.rating == 4 && prot.filter { $0.rating > 0 }.count == 1,
+              "stars given in the camera are read from the CR3")
+        var firstNames: [String] = []
+        var lockedCopy: URL?
+        let rp = FileOps.ingest(prot, to: work.appendingPathComponent("jobP/raw"), name: { p, n in v.fileName(photo: p, seq: n) },
+                                metadata: nil, cancelled: { false }, priority: Controller.isMarked,
+                                onPhoto: { p in
+                                    firstNames.append(p.originalFileName)
+                                    if p.originalFileName == "_V1_9502.CR3" { lockedCopy = p.url }
+                                })
+        check(rp.copied == 4 && rp.errors.isEmpty && Set(firstNames.prefix(2)) == ["_V1_9502.CR3", "_V1_9503.CR3"],
+              "tagged and rated photos are copied first (\(firstNames.joined(separator: " ")))\(rp.errors.first.map { ": " + $0 } ?? "")")
+        check(lockedCopy.map { fm.fileExists(atPath: $0.path) && !Scanner.isLocked($0) } == true,
+              "the copy of a protected photo is not locked and has its real name")
+        chflags(lockedFile.path, 0)
+
+        // 10h. camera clocks: the serial number is read, a correction moves the capture time and the names, but never
+        //      the key of the ingest history; the corrected time goes into the XMP
+        if let cp = prot.first {
+            let key = IngestHistory.key(cp)
+            let before = cp.shootTime
+            cp.clockOffset = 72
+            let after = cp.shootTime
+            let args = v.metadataArgs(photo: cp, seq: 1)
+            check(cp.body != nil && IngestHistory.key(cp) == key && before != after
+                  && args.contains { $0.hasPrefix("-XMP-exif:DateTimeOriginal=") },
+                  "clock per body: \(cp.body ?? "no serial number"), \(before) + 1:12 = \(after); history key unchanged; capture time in the XMP")
+            cp.clockOffset = 0
+        }
+        check(ExifDate.parseOffset("+1:12") == 72 && ExifDate.parseOffset("-0:01:12") == -72 && ExifDate.parseOffset("1m12s") == 72
+              && ExifDate.parseOffset("-5") == -5 && ExifDate.offsetText(-72) == "-0:01:12", "clock corrections are read and written as text")
+
+        // 10i. the camera's JPEG out of a CR3: full size as it is, 2048 px smaller, both with the Adobe RGB profile
+        //      and the camera's EXIF; time per photo
+        for (folder, edge) in [("exp-full", 0), ("exp-2048", 2048)] {
+            let dir = work.appendingPathComponent(folder)
+            let te = nowMs()
+            let res = Export.run(prot, to: dir, name: { p, n in v.fileName(photo: p, seq: n) }, longEdge: edge == 0 ? nil : edge,
+                                 progress: { _ in }, cancelled: { false })
+            let tJPEG = nowMs() - te
+            let meta = ExifTool.shared.run(res.done.enumerated().map { i, item in Export.metadataCommand(item, fields: v.metadataArgs(photo: item.photo, seq: i + 1)) })
+            let tAll = nowMs() - te
+            var sizesOK = true, profileOK = true
+            for item in res.done {
+                guard let src = CGImageSourceCreateWithURL(item.url as CFURL, nil),
+                      let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { sizesOK = false; continue }
+                let w = props[kCGImagePropertyPixelWidth] as? Int ?? 0, h = props[kCGImagePropertyPixelHeight] as? Int ?? 0
+                if edge == 0 ? w < 6000 : max(w, h) != edge { sizesOK = false }
+                if item.adobeRGB && (props[kCGImagePropertyProfileName] as? String ?? "") != "Adobe RGB (1998)" { profileOK = false }
+            }
+            check(res.done.count == prot.count && res.errors.isEmpty && meta.allSatisfy { $0.ok } && sizesOK && profileOK,
+                  "camera JPEG \(edge == 0 ? "full size" : "\(edge) px"): \(res.done.count) in \(ms(tJPEG)) (\(ms(tJPEG / Double(max(1, res.done.count)))) each), with metadata \(ms(tAll)); size, profile and EXIF right")
+        }
+
+        // 10j. a second copy during the ingest, every copy checked against the card: both copies byte for byte the same
+        //      as the source, the XMP in both, file dates as on the card
+        var copiesB: [String: URL] = [:]
+        let rb = FileOps.ingest(prot, to: work.appendingPathComponent("jobB/raw"), name: { p, n in v.fileName(photo: p, seq: n) },
+                                metadata: { p in v.metadataArgs(photo: p, seq: 1) + Metadata.stateArgs(p, labelNames: v.labelNames) },
+                                cancelled: { false }, backup: work.appendingPathComponent("backupB/raw"), verify: true,
+                                onPhoto: { p in copiesB[p.originalFileName] = p.url })
+        let mainFiles = ((try? fm.contentsOfDirectory(atPath: work.appendingPathComponent("jobB/raw").path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        let backFiles = ((try? fm.contentsOfDirectory(atPath: work.appendingPathComponent("backupB/raw").path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        var sameBytes = !mainFiles.isEmpty
+        for f in mainFiles {
+            let a = try? Data(contentsOf: work.appendingPathComponent("jobB/raw/" + f)), b = try? Data(contentsOf: work.appendingPathComponent("backupB/raw/" + f))
+            if a == nil || a != b { sameBytes = false }
+        }
+        let srcCR3 = prot.first { $0.name.hasSuffix(".CR3") }
+        let copyCR3 = srcCR3.flatMap { copiesB[$0.originalFileName] }
+        let sameAsCard = srcCR3.flatMap { s in copyCR3.map { (try? Data(contentsOf: s.url)) == (try? Data(contentsOf: $0)) } } ?? false
+        let sameDate = srcCR3.flatMap { s in copyCR3.map {
+            ((try? fm.attributesOfItem(atPath: s.url.path))?[.modificationDate] as? Date) == ((try? fm.attributesOfItem(atPath: $0.path))?[.modificationDate] as? Date)
+        } } ?? false
+        check(rb.copied == prot.count && rb.errors.isEmpty && mainFiles == backFiles && mainFiles.filter { $0.hasSuffix(".xmp") }.count == prot.count
+              && sameBytes && sameAsCard && sameDate,
+              "second copy, checked: \(mainFiles.count) files in both folders, byte for byte the same, XMP in both, dates as on the card\(rb.errors.first.map { ": " + $0 } ?? "")"
+              + (sameAsCard && sameDate ? "" : " [card \(sameAsCard) date \(sameDate) copy \(copyCR3?.lastPathComponent ?? "-") src \(srcCR3?.name ?? "-") keys \(copiesB.keys.sorted())]"))
+
+        // 10k. who is in one photo, and code replacements: \jb\ becomes James Bay in the field, per photo, in the
+        //      caption through {personshown}, and in the XMP
+        let codeFile = work.appendingPathComponent("codes.txt")
+        try? "jb\tJames Bay\nms\tMarcus Smith\n".write(to: codeFile, atomically: true, encoding: .utf8)
+        let nCodes = Codes.load(codeFile.path)
+        var cv = v
+        cv.values["personshown"] = "\\jb\\"
+        cv.values["caption"] = "{personshown} at {location}"
+        let onePhoto = prot[0]
+        let jobCaption = cv.value("caption", photo: onePhoto)
+        onePhoto.people = ["\\ms\\", "\\jb\\"]
+        let photoCaption = cv.value("caption", photo: onePhoto)
+        let peopleArgs = cv.metadataArgs(photo: onePhoto, seq: 1).filter { $0.hasPrefix("-XMP-iptcExt:PersonInImage=") }
+        check(nCodes == 2 && cv.value("personshown") == "James Bay" && jobCaption.hasPrefix("James Bay at")
+              && photoCaption.hasPrefix("Marcus Smith; James Bay at")
+              && peopleArgs == ["-XMP-iptcExt:PersonInImage=Marcus Smith", "-XMP-iptcExt:PersonInImage=James Bay"]
+              && Codes.expand("\\xx\\ stays") == "\\xx\\ stays",
+              "person per photo and code replacements: \(photoCaption)")
+        onePhoto.people = nil
+        Codes.load("")
+
+        // 10l. the index of a folder (used for the NAS): the second reading takes everything from it, with the same
+        //      dates, tags and stars; a photo whose XMP changed is read again
+        let idxDir = work.appendingPathComponent("index")
+        let idxRoot = [work.appendingPathComponent("jobB/raw")]
+        let (f1, s1) = Scanner.collectFilesWithStamps(idxRoot)
+        let index1 = FolderIndex(roots: idxRoot, directory: idxDir)
+        let read1 = Scanner.load(Scanner.group(f1), index: index1, stamps: s1) { _ in }
+        index1.save()
+        let index2 = FolderIndex(roots: idxRoot, directory: idxDir)
+        let read2 = Scanner.load(Scanner.group(f1), index: index2, stamps: s1) { _ in }
+        func same(_ a: Photo, _ b: Photo) -> Bool {
+            a.url == b.url && a.cameraDate == b.cameraDate && a.tagged == b.tagged && a.rating == b.rating && a.label == b.label
+                && a.originalFileName == b.originalFileName && a.orientation == b.orientation && a.body == b.body
+                && a.cr3?.jpegOffset == b.cr3?.jpegOffset && a.cr3?.prvwLength == b.cr3?.prvwLength && a.sidecar == b.sidecar
+        }
+        let allSame = read1.count == read2.count && zip(read1, read2).allSatisfy { same($0, $1) }
+        var readAgain = false
+        if let changed = read2.first(where: { $0.sidecar != nil }), let x = changed.sidecar {
+            _ = ExifTool.shared.run([["-overwrite_original", "-XMP-xmp:Rating=5", x.path]])
+            let (f3, s3) = Scanner.collectFilesWithStamps(idxRoot)
+            index2.save()
+            let index3 = FolderIndex(roots: idxRoot, directory: idxDir)
+            let read3 = Scanner.load(Scanner.group(f3), index: index3, stamps: s3) { _ in }
+            readAgain = read3.first { $0.url == changed.url }?.rating == 5 && index3.used == read3.count - 1
+        }
+        check(index2.used == read2.count && allSame && readAgain,
+              "folder index: \(index2.used) of \(read2.count) photos from the index, the same as read from the files; a changed XMP is read again")
+
+        // 10f. filters on stars and labels, and a selection that only keeps what is shown
+        if inc2.count >= 4 {
+            let fs = Session()
+            let fp = inc2
+            fp[0].rating = 4; fp[1].rating = 2; fp[2].rating = 5; fp[2].label = .red; fp[3].label = .red
+            fs.setPhotos(fp, roots: [])
+            fs.minRating = 3; fs.rebuildVisible(keeping: nil)
+            let stars = fs.visible.count == 2 && fs.visible.allSatisfy { $0.rating >= 3 }
+            fs.minRating = 0; fs.labelFilter = .red; fs.rebuildVisible(keeping: nil)
+            let label = fs.visible.count == 2 && fs.visible.allSatisfy { $0.label == .red }
+            fs.labelFilter = nil; fs.rebuildVisible(keeping: nil)
+            fs.selection = Set(fs.visible.map { ObjectIdentifier($0) })
+            fs.scope = .selected
+            fs.minRating = 3; fs.rebuildVisible(keeping: fp[0])
+            let pruned = fs.selection.count == 2 && fs.scope == .selected
+            fs.selection = [ObjectIdentifier(fp[0])]
+            check(stars && label && pruned && fs.scope == .tagged, "filters on stars and labels; a selection keeps only the photos shown")
+            fs.currentIndex = 0
+            fp[0].rating = 0; fs.rebuildVisible(keeping: fp[0])
+            check(fs.currentPhoto === fp[2], "a photo that drops out of the filter: the next one shown becomes current")
+        }
+
         // 10d. a folder on the Mac's own disk is not a memory card (so tags are saved there)
         check(!CardWatcher.isOnCard(work) && !CardWatcher.isCard(URL(fileURLWithPath: "/")), "the Mac's own disk is not taken for a memory card")
 

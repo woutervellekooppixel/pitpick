@@ -209,7 +209,7 @@ final class StateWriter {
         }
         let names = labelNames()
         let targets = photos.map { $0.metadataTarget }
-        let commands = zip(photos, targets).map { p, t in ["-overwrite_original"] + Metadata.stateArgs(p, labelNames: names) + [t.path] }
+        let commands = zip(photos, targets).map { p, t in ["-overwrite_original"] + Metadata.stateArgs(p, labelNames: names) + Metadata.peopleArgs(p) + [t.path] }
         let finish: ([ExifTool.Result]) -> Void = { [weak self] results in
             for (i, r) in results.enumerated() where i < photos.count {
                 let p = photos[i]

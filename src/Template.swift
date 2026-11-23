@@ -13,6 +13,49 @@ struct FieldDef {
     let pinnedByDefault: Bool
 }
 
+/// Code replacements, as in Photo Mechanic: a text file with on each line a code, a tab and its text, for example
+/// `jb<tab>James Bay`. Type \jb\ in any field (or as the person in a photo) and the metadata says James Bay.
+enum Codes {
+    private static let lock = NSLock()
+    private static var table: [String: String] = [:]
+
+    /// Reads the file; the number of codes (0 when there is no file).
+    @discardableResult
+    static func load(_ path: String) -> Int {
+        var t: [String: String] = [:]
+        let text = path.isEmpty ? nil
+            : (try? String(contentsOfFile: path, encoding: .utf8)) ?? (try? String(contentsOfFile: path, encoding: .isoLatin1))
+        if let text = text {
+            for line in text.split(whereSeparator: \.isNewline) {
+                let cols = line.split(separator: "\t", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if cols.count == 2, !cols[0].isEmpty { t[cols[0].lowercased()] = cols[1] }
+            }
+        }
+        lock.lock(); table = t; lock.unlock()
+        return t.count
+    }
+
+    static var count: Int { lock.lock(); defer { lock.unlock() }; return table.count }
+
+    /// \\code\\ becomes its text; a code that is not in the file stays as it is.
+    static func expand(_ s: String) -> String {
+        guard s.contains("\\") else { return s }
+        lock.lock(); let t = table; lock.unlock()
+        guard !t.isEmpty else { return s }
+        var out = ""
+        var rest = Substring(s)
+        while let open = rest.firstIndex(of: "\\") {
+            out += rest[..<open]
+            let after = rest.index(after: open)
+            guard let close = rest[after...].firstIndex(of: "\\") else { out += rest[open...]; return out }
+            let code = String(rest[after..<close])
+            if let r = t[code.lowercased()] { out += r } else { out += rest[open...close] }
+            rest = rest[rest.index(after: close)...]
+        }
+        return out + rest
+    }
+}
+
 enum Fields {
     // Generic defaults. Personal values (name, copyright, own templates) live in a preset (.pitpick file).
     static let all: [FieldDef] = [
@@ -166,12 +209,18 @@ struct PadValues: Codable, Equatable {
         case "time": return photo?.shootTime ?? "21-04-37"
         default:
             guard Fields.byKey[name] != nil, depth < 4 else { return nil }
-            return resolve(values[name] ?? "", photo: photo, seq: seq, depth: depth + 1)
+            return resolve(raw(name, photo: photo), photo: photo, seq: seq, depth: depth + 1)
         }
     }
 
+    /// A field as typed; Person shown can differ per photo.
+    private func raw(_ key: String, photo: Photo?) -> String {
+        if key == "personshown", let ppl = photo?.people { return ppl.joined(separator: "; ") }
+        return values[key] ?? ""
+    }
+
     func value(_ key: String, photo: Photo? = nil, seq: Int = 1) -> String {
-        resolve(values[key] ?? "", photo: photo, seq: seq).trimmingCharacters(in: .whitespaces)
+        Codes.expand(resolve(raw(key, photo: photo), photo: photo, seq: seq)).trimmingCharacters(in: .whitespaces)
     }
 
     func list(_ key: String, photo: Photo? = nil, seq: Int = 1) -> [String] {
@@ -186,8 +235,8 @@ struct PadValues: Codable, Equatable {
         return out
     }
 
-    func fileName(photo: Photo?, seq: Int) -> String { tidy(resolve(fileTemplate, photo: photo, seq: seq)) }
-    var folderName: String { tidy(resolve(folderTemplate)) }
+    func fileName(photo: Photo?, seq: Int) -> String { tidy(Codes.expand(resolve(fileTemplate, photo: photo, seq: seq))) }
+    var folderName: String { tidy(Codes.expand(resolve(folderTemplate))) }
 
     /// A safe name; with the option on, spaces become dashes ("Piano Man - Jeroen" -> "Piano-Man-Jeroen").
     func tidy(_ s: String) -> String {
@@ -227,6 +276,12 @@ struct PadValues: Codable, Equatable {
             }
         }
         if !value("copyright").isEmpty { a.append("-XMP-xmpRights:Marked=True") }
+        if let p = photo, p.clockOffset != 0 {
+            // the camera's clock was corrected: Lightroom and Photo Mechanic read the capture time from the XMP
+            let when = ExifDate.xmpString(p.captureDate, zone: p.captureZone)
+            a.append("-XMP-exif:DateTimeOriginal=\(when)")
+            a.append("-XMP-photoshop:DateCreated=\(when)")
+        }
         return a
     }
 
@@ -266,6 +321,13 @@ enum Metadata {
         return a
     }
 
+    /// Who is in this one photo, when set for it (the job's Person shown otherwise comes with the other fields).
+    static func peopleArgs(_ p: Photo) -> [String] {
+        guard let ppl = p.people else { return [] }
+        let names = ppl.map { Codes.expand($0) }.filter { !$0.isEmpty }
+        return names.isEmpty ? ["-XMP-iptcExt:PersonInImage="] : names.map { "-XMP-iptcExt:PersonInImage=\($0)" }
+    }
+
     static func stateArgs(_ p: Photo, labelNames: [String]) -> [String] {
         stateArgs(tagged: p.tagged, rating: p.rating, label: p.label,
                   original: p.hasStoredOriginal ? nil : p.originalFileName, labelNames: labelNames)
@@ -283,6 +345,32 @@ final class Pad: ObservableObject {
     @Published var pinned: Set<String> { didSet { defaults.set(Array(pinned), forKey: "pad.pinned") } }
     @Published var ingestRoot: String { didSet { defaults.set(ingestRoot, forKey: "pad.ingestRoot") } }
     @Published var copyRoot: String { didSet { defaults.set(copyRoot, forKey: "pad.copyRoot") } }
+    /// Incremental ingest: photos ingested before are skipped (on by default).
+    @Published var skipIngested: Bool { didSet { defaults.set(skipIngested, forKey: "pad.skipIngested") } }
+    /// Ingest: tagged, rated and labelled photos (also protected or rated in the camera) are copied first.
+    @Published var priorityFirst: Bool { didSet { defaults.set(priorityFirst, forKey: "pad.priorityFirst") } }
+    /// Ingest: a second copy goes here (<job folder>/<raw folder>, the same names). Empty = none.
+    @Published var backupRoot: String { didSet { defaults.set(backupRoot, forKey: "pad.backupRoot") } }
+    /// Ingest: every copy is read back from its disk and checked against the card (SHA-256).
+    @Published var verifyCopies: Bool { didSet { defaults.set(verifyCopies, forKey: "pad.verifyCopies") } }
+    /// Ingest: eject the cards when everything is copied without problems.
+    @Published var ejectCards: Bool { didSet { defaults.set(ejectCards, forKey: "pad.ejectCards") } }
+    /// A photo protected in the camera counts as tagged when you open the card.
+    @Published var protectedIsTagged: Bool {
+        didSet { defaults.set(protectedIsTagged, forKey: "pad.protectedIsTagged"); Scanner.lockedIsTagged = protectedIsTagged }
+    }
+    /// Copy selection as raw files (0) or as the camera's JPEG (1).
+    @Published var copyFormat: Int { didSet { defaults.set(copyFormat, forKey: "pad.copyFormat") } }
+    /// JPEG long edge in pixels (0 = full size, as the camera made it).
+    @Published var jpegLongEdge: Int { didSet { defaults.set(jpegLongEdge, forKey: "pad.jpegLongEdge") } }
+    /// Code replacements file (tab-separated: code, text). Empty = none.
+    @Published var codeFile: String { didSet { defaults.set(codeFile, forKey: "pad.codeFile"); Codes.load(codeFile) } }
+    /// After a tag, stars or a label: the next photo (or keep Caps Lock on, as in Lightroom).
+    @Published var autoAdvance: Bool { didSet { defaults.set(autoAdvance, forKey: "view.autoAdvance") } }
+    /// Clock corrections per camera body (serial number), in seconds. Kept: a body keeps drifting the same way.
+    @Published var clockOffsets: [String: Double] { didSet { defaults.set(clockOffsets, forKey: "clock.offsets") } }
+    /// T also sets this colour label (1-5, 0 = none), for Lightroom, which does not read the tag.
+    @Published var tagLabel: Int { didSet { defaults.set(tagLabel, forKey: "pad.tagLabel") } }
     @Published var copyFolderOverride = ""
     /// Folders where Pitpick never writes (for example an archive drive). View and copy only.
     @Published var readOnlyFolders: [String] { didSet { defaults.set(readOnlyFolders, forKey: "pad.readOnly") } }
@@ -300,12 +388,26 @@ final class Pad: ObservableObject {
         ingestRoot = defaults.string(forKey: "pad.ingestRoot") ?? ""
         copyRoot = defaults.string(forKey: "pad.copyRoot") ?? defaults.string(forKey: "doelmap") ?? ""
         readOnlyFolders = defaults.stringArray(forKey: "pad.readOnly") ?? []
+        skipIngested = defaults.object(forKey: "pad.skipIngested") as? Bool ?? true
+        priorityFirst = defaults.object(forKey: "pad.priorityFirst") as? Bool ?? true
+        ejectCards = defaults.object(forKey: "pad.ejectCards") as? Bool ?? false
+        backupRoot = defaults.string(forKey: "pad.backupRoot") ?? ""
+        verifyCopies = defaults.bool(forKey: "pad.verifyCopies")
+        protectedIsTagged = defaults.object(forKey: "pad.protectedIsTagged") as? Bool ?? true
+        tagLabel = defaults.integer(forKey: "pad.tagLabel")
+        autoAdvance = defaults.bool(forKey: "view.autoAdvance")
+        copyFormat = defaults.integer(forKey: "pad.copyFormat")
+        codeFile = defaults.string(forKey: "pad.codeFile") ?? ""
+        jpegLongEdge = defaults.integer(forKey: "pad.jpegLongEdge")
+        clockOffsets = defaults.dictionary(forKey: "clock.offsets") as? [String: Double] ?? [:]
         var z: [String: String] = [:], n: [String: String] = [:]
         if let saved = defaults.dictionary(forKey: "pad.venues") as? [String: String] {
             for (loc, city) in saved { z[loc.lowercased()] = city; n[loc.lowercased()] = loc }
         }
         venues = z
         venueNames = n
+        Scanner.lockedIsTagged = protectedIsTagged
+        Codes.load(codeFile)
     }
 
     var jobFields: [FieldDef] { Fields.all.filter { !pinned.contains($0.key) } }
@@ -345,15 +447,19 @@ final class Pad: ObservableObject {
     }
 
     /// Opening a folder: a different folder than last time starts a new job, filled from the photos' own metadata.
-    func open(folderKey: String, firstDay: String, xmp: () -> String?) {
+    /// Returns true when this started a new job.
+    @discardableResult
+    func open(folderKey: String, firstDay: String, xmp: () -> String?) -> Bool {
         if defaults.string(forKey: "pad.job") != folderKey {
             newJob()
             if let text = xmp() { fill(from: text) }
             v.date = firstDay
             defaults.set(folderKey, forKey: "pad.job")
+            return true
         } else if v.date.isEmpty {
             v.date = firstDay
         }
+        return false
     }
 
     /// After an ingest the job continues in the new folder.

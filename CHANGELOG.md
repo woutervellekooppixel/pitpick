@@ -2,6 +2,33 @@
 
 What changed in each version of Pitpick (formerly Snelkeus), newest first. Downloads are on the [Releases](https://github.com/woutervellekooppixel/pitpick/releases) page.
 
+## 1.5 - 2026-11-23
+
+### Added
+- **Incremental ingest**, like Photo Mechanic. Pitpick remembers every photo it ingested (camera file name and capture time). Ingest the same card again and only the new photos are copied, also when the first copies were renamed, moved or culled. Opening a card that was ingested before continues that job, with its fields and folder.
+- **Several photos at once.** Shift-click, ⌘-click, shift-arrows and ⌘A select photos in the grid; `T`, stars and labels work on all of them. Write and rename and Copy can work on the selection.
+- **Undo** for tags, stars and labels: ⌘Z and ⇧⌘Z, also for a selection.
+- **Filters** on stars (at least that many) and colour labels, next to Tagged only: click a star or a colour dot in the panel, or ⌥⌘1-5; ⌥⌘0 shows everything again.
+- **Next photo after a tag, stars or label**, as a setting, or keep Caps Lock on as in Lightroom.
+- **Compare.** `C` shows the selected photos (two to four), or this photo and the next, side by side. Space or a click zooms all of them to 100% on the same spot and dragging moves them together; the arrows choose the active photo, and keys work on that one.
+- **Camera clocks.** With photos from two or more bodies, the panel lists each body (by serial number) with its clock correction. Type one, or select two photos of the same moment and click Same moment. The shooting order, `{shootdate}`, `{time}` and the capture time in the XMP follow.
+- **Camera JPEG.** Copy selection can deliver the JPEG the camera made, taken out of the raw: full size (not compressed again) or 3000 or 2048 px, with the camera's EXIF, its colour profile (Adobe RGB when the camera is set to it) and your caption.
+- **A second copy during the ingest**, on another disk: the card is read once and written twice. With **Check every copy against the card**, each copy is read back from its disk and its SHA-256 compared with the card's, while the next photo comes off the card.
+- **Protected and rated in the camera.** A photo you protected in the camera shows a padlock and counts as tagged on the card (a setting); stars given in the camera are read. **Tagged and rated photos first** copies those first, from all cards.
+- **Eject the cards when done**, as a setting.
+- **T also sets a label**, as a setting, for Lightroom, which does not read the tag.
+- **Person shown per photo.** `P` sets who is in this photo (or the selection); `{personshown}` in the caption follows it.
+- **Code replacements**, as in Photo Mechanic: a text file with a code, a tab and its text on each line. Type `\jb\` in any field, or as the person in a photo, and the metadata says James Bay.
+- **Folders on a network drive** get a small index on the Mac (nothing is written on the drive), so opening one again only reads what changed.
+
+### Changed
+- Tags, stars and labels: the screen is ready after a key in 0.02 ms (was 3-4 ms), because the panel now only updates the counts.
+- Opening a folder replaces the photos directly, without an empty grid in between.
+- The colour-label filter and the label for `T` are coloured dots, the star filter is five stars.
+
+### Fixed
+- A photo protected in the camera could not be ingested in 1.4 and 1.4.1: the copy kept the card's lock and could not get its real name. Copies are never locked now.
+
 ## 1.4.1 - 2026-11-23
 
 ### Added

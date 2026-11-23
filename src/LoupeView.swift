@@ -5,6 +5,10 @@ import QuartzCore
 
 final class LoupeView: NSView {
     weak var controller: Controller?
+    /// ⌘Z on the photos undoes tags, stars and labels.
+    override var undoManager: UndoManager? { controller?.cullUndo ?? super.undoManager }
+    @objc func undo(_ sender: Any?) { controller?.cullUndo.undo() }
+    @objc func redo(_ sender: Any?) { controller?.cullUndo.redo() }
 
     private let root = CALayer()
     private let imageLayer = CALayer()
@@ -201,6 +205,7 @@ final class LoupeView: NSView {
         let when = ExifDate.displayFormatter.string(from: p.captureDate)
         var info = "\(c.session.currentIndex + 1) / \(c.session.visible.count)     \(p.name)     \(when)"
         if zoomed { info += "     100%" }
+        if let ppl = p.people, !ppl.isEmpty { info += "     " + ppl.map { Codes.expand($0) }.joined(separator: ", ") }
         infoLayer.string = info
         starsLayer.string = p.rating > 0 ? String(repeating: "★", count: p.rating) : ""
         badgeLayer.isHidden = false
@@ -324,4 +329,8 @@ final class LoupeView: NSView {
     var debugGeometry: (bounds: CGRect, position: CGPoint, transform: CGAffineTransform, contents: Bool) {
         (imageLayer.bounds, imageLayer.position, imageLayer.affineTransform(), imageLayer.contents != nil)
     }
+}
+
+extension LoupeView: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { controller?.validateCullMenu(item) ?? true }
 }

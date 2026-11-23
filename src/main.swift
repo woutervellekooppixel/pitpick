@@ -15,6 +15,9 @@ extension Controller {
     @objc func menuImportPreset(_ sender: Any?) { chooseImportPreset() }
     @objc func menuExportPreset(_ sender: Any?) { chooseExportPreset() }
     @objc func menuOnlyTagged(_ sender: Any?) { setOnlyTagged(!session.onlyTagged) }
+    @objc func menuMinRating(_ sender: NSMenuItem) { setMinRating(sender.tag) }
+    @objc func menuClearFilters(_ sender: Any?) { clearFilters() }
+    @objc func menuAutoAdvance(_ sender: Any?) { autoAdvance.toggle() }
     @objc func menuBigger(_ sender: Any?) { changeThumbSize(32) }
     @objc func menuSmaller(_ sender: Any?) { changeThumbSize(-32) }
     @objc func menuPanel(_ sender: Any?) { togglePanel() }
@@ -65,6 +68,15 @@ enum Menus {
         let view = NSMenu(title: "View")
         view.addItem(item("Grid or Loupe (↩)", #selector(Controller.menuGridLoupe(_:)), "", c))
         view.addItem(item("Tagged Only", #selector(Controller.menuOnlyTagged(_:)), "t", c))
+        view.addItem(item("Compare Side by Side (C)", #selector(Controller.menuCompare(_:)), "", c))
+        view.addItem(item("Person Shown in This Photo… (P)", #selector(Controller.menuPeople(_:)), "", c))
+        for n in 1...5 {
+            let i = item(n == 5 ? "Five Stars" : "\(n) Star\(n == 1 ? "" : "s") or More", #selector(Controller.menuMinRating(_:)), "\(n)", c, [.command, .option])
+            i.tag = n
+            view.addItem(i)
+        }
+        view.addItem(item("Show All (Clear Filters)", #selector(Controller.menuClearFilters(_:)), "0", c, [.command, .option]))
+        view.addItem(item("Next Photo After Tagging (or Caps Lock)", #selector(Controller.menuAutoAdvance(_:)), "", c))
         view.addItem(.separator())
         view.addItem(item("Larger Thumbnails", #selector(Controller.menuBigger(_:)), "+", c))
         let eq = item("Larger Thumbnails", #selector(Controller.menuBigger(_:)), "=", c)

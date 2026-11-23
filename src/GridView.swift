@@ -3,6 +3,10 @@ import AppKit
 
 final class GridView: NSView {
     weak var controller: Controller?
+    /// ⌘Z on the photos undoes tags, stars and labels.
+    override var undoManager: UndoManager? { controller?.cullUndo ?? super.undoManager }
+    @objc func undo(_ sender: Any?) { controller?.cullUndo.undo() }
+    @objc func redo(_ sender: Any?) { controller?.cullUndo.redo() }
     var cellWidth: CGFloat = 184 { didSet { relayout() } }
     let gap: CGFloat = 8
     let pad: CGFloat = 12
@@ -89,7 +93,8 @@ final class GridView: NSView {
         for i in first...last {
             let r = cellRect(i)
             guard r.intersects(dirtyRect) else { continue }
-            drawCell(ctx, list[i], r, current: i == c.session.currentIndex)
+            drawCell(ctx, list[i], r, current: i == c.session.currentIndex,
+                     selected: c.session.selection.contains(ObjectIdentifier(list[i])))
         }
     }
 
@@ -102,7 +107,10 @@ final class GridView: NSView {
                 : "Your cards are at the top of the panel: View to look at them on the card, Ingest to copy them"
         }
         else if c.session.ingesting { text = "Copying the first photos..." }
-        else { text = c.session.onlyTagged ? "Nothing tagged yet. Press T to tag, ⌘T shows everything again." : "No photos found in this folder." }
+        else if c.session.filtering { text = c.session.onlyTagged && c.session.minRating == 0 && c.session.labelFilter == nil
+            ? "Nothing tagged yet. Press T to tag, ⌘T shows everything again."
+            : "No photos match the filter. ⌥⌘0 shows everything again." }
+        else { text = "No photos found in this folder." }
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor(white: 0.6, alpha: 1)]
         let s = text as NSString
         let size = s.size(withAttributes: attrs)
@@ -110,11 +118,17 @@ final class GridView: NSView {
         s.draw(at: CGPoint(x: vr.midX - size.width / 2, y: vr.midY - size.height / 2), withAttributes: attrs)
     }
 
-    private func drawCell(_ ctx: CGContext, _ p: Photo, _ r: CGRect, current: Bool) {
-        let bg = current ? NSColor(white: 0.26, alpha: 1) : NSColor(white: 0.09, alpha: 1)
+    private func drawCell(_ ctx: CGContext, _ p: Photo, _ r: CGRect, current: Bool, selected: Bool) {
+        let bg = current ? NSColor(white: 0.26, alpha: 1) : selected ? NSColor(white: 0.19, alpha: 1) : NSColor(white: 0.09, alpha: 1)
         ctx.setFillColor(bg.cgColor)
         ctx.addPath(CGPath(roundedRect: r, cornerWidth: 5, cornerHeight: 5, transform: nil))
         ctx.fillPath()
+        if selected {
+            ctx.setStrokeColor(NSColor(white: 0.62, alpha: 1).cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.addPath(CGPath(roundedRect: r.insetBy(dx: 0.75, dy: 0.75), cornerWidth: 5, cornerHeight: 5, transform: nil))
+            ctx.strokePath()
+        }
 
         let imgArea = CGRect(x: r.minX + 6, y: r.minY + 6, width: r.width - 12, height: imageHeight)
         if let t = controller?.pipeline.thumb(p.id) {
@@ -139,6 +153,7 @@ final class GridView: NSView {
             ctx.strokePath()
         }
         drawTagBox(ctx, tagRect(r), on: p.tagged)
+        if p.locked { drawLock(ctx, left: tagRect(r)) }
 
         // name and stars
         let nameAttrs: [NSAttributedString.Key: Any] = [
@@ -159,6 +174,18 @@ final class GridView: NSView {
         var na = nameAttrs
         na[.paragraphStyle] = style
         (p.name as NSString).draw(with: nameRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: na)
+    }
+
+    /// A small padlock left of the tag box: protected in the camera.
+    private func drawLock(_ ctx: CGContext, left tag: CGRect) {
+        let body = CGRect(x: tag.minX - 17, y: tag.midY - 1, width: 10, height: 8)
+        ctx.setFillColor(NSColor(white: 1, alpha: 0.9).cgColor)
+        ctx.addPath(CGPath(roundedRect: body, cornerWidth: 1.5, cornerHeight: 1.5, transform: nil))
+        ctx.fillPath()
+        ctx.setStrokeColor(NSColor(white: 1, alpha: 0.9).cgColor)
+        ctx.setLineWidth(1.5)
+        ctx.addArc(center: CGPoint(x: body.midX, y: body.minY), radius: 3, startAngle: .pi, endAngle: 0, clockwise: false)
+        ctx.strokePath()
     }
 
     private func drawTagBox(_ ctx: CGContext, _ r: CGRect, on: Bool) {
@@ -212,19 +239,41 @@ final class GridView: NSView {
     override func mouseDown(with e: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(e.locationInWindow, from: nil)
-        guard let c = controller, let i = index(at: p) else { return }
+        // a click between the photos clears the selection
+        guard let c = controller, let i = index(at: p) else { controller?.clearSelection(); return }
         if tagRect(cellRect(i)).insetBy(dx: -4, dy: -4).contains(p) {
+            // the tag box of a selected photo tags the whole selection
+            if !c.isSelected(i) { c.clearSelection() }
             c.setCurrent(i)
             c.toggleTag()
             return
         }
+        if e.modifierFlags.contains(.command) { c.toggleSelect(i); return }
+        if e.modifierFlags.contains(.shift) { c.extendSelection(to: i); return }
+        c.clearSelection()
         c.setCurrent(i)
         if e.clickCount == 2 { c.setMode(.loupe) }
     }
 
+    /// ⌘A (Edit > Select All): every photo that is shown.
+    override func selectAll(_ sender: Any?) { controller?.selectAll() }
+
     override func keyDown(with e: NSEvent) {
         guard let c = controller else { return super.keyDown(with: e) }
         let mods = e.modifierFlags.intersection([.command, .option, .control])
+        if mods.isEmpty && e.modifierFlags.contains(.shift) {
+            // shift-arrow: grow the selection
+            let i = c.session.currentIndex
+            switch e.keyCode {
+            case 123: c.extendSelection(to: i - 1); return
+            case 124: c.extendSelection(to: i + 1); return
+            case 125: c.extendSelection(to: i + columns); return
+            case 126: c.extendSelection(to: i - columns); return
+            default: break
+            }
+        }
+        if mods.isEmpty, [123, 124, 125, 126, 115, 119, 116, 121].contains(e.keyCode) { c.clearSelection() }
+        if mods.isEmpty && e.keyCode == 53 { c.clearSelection(); return }
         if mods.isEmpty {
             switch e.keyCode {
             case 123: c.move(-1); return
@@ -255,4 +304,8 @@ func drawImage(_ ctx: CGContext, _ img: CGImage, in target: CGRect, orientation:
     let h = swap ? target.width : target.height
     ctx.draw(img, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
     ctx.restoreGState()
+}
+
+extension GridView: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { controller?.validateCullMenu(item) ?? true }
 }

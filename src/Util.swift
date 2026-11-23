@@ -17,6 +17,8 @@ extension Data {
 final class RAFile {
     let fd: Int32
     let size: UInt64
+    /// st_flags: UF_IMMUTABLE is set for a photo protected in the camera (the card's read-only attribute).
+    let flags: UInt32
 
     init?(_ url: URL) {
         let f = open(url.path, O_RDONLY)
@@ -25,6 +27,7 @@ final class RAFile {
         if fstat(f, &st) != 0 { close(f); return nil }
         fd = f
         size = UInt64(st.st_size)
+        flags = st.st_flags
     }
 
     deinit { close(fd) }
@@ -107,6 +110,46 @@ enum ExifDate {
         guard digits.count >= 4, let h = Int(digits.prefix(2)), let m = Int(digits.dropFirst(2).prefix(2)) else { return nil }
         let sign = s.hasPrefix("-") ? -1 : 1
         return TimeZone(secondsFromGMT: sign * (h * 3600 + m * 60))
+    }
+
+    /// "2026:11:19 21:04:37+01:00", as exiftool writes XMP dates.
+    static func xmpString(_ d: Date, zone: TimeZone?) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone ?? .current
+        f.dateFormat = "yyyy:MM:dd HH:mm:ssxxx"
+        return f.string(from: d)
+    }
+
+    /// A clock correction as text: +0:01:12, -0:00:05.
+    static func offsetText(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds.rounded())
+        let a = abs(s)
+        return (s < 0 ? "-" : "+") + String(format: "%d:%02d:%02d", a / 3600, a / 60 % 60, a % 60)
+    }
+
+    /// Reads +1:12 (minutes and seconds), +0:01:12, -5 (seconds) or 1h2m3s. Nil when it cannot be read.
+    static func parseOffset(_ text: String) -> TimeInterval? {
+        var t = text.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !t.isEmpty else { return 0 }
+        var sign = 1.0
+        if t.hasPrefix("-") { sign = -1; t.removeFirst() } else if t.hasPrefix("+") { t.removeFirst() }
+        if t.contains("h") || t.contains("m") || t.contains("s") {
+            var total = 0.0, num = ""
+            for ch in t {
+                if ch.isNumber || ch == "." { num.append(ch); continue }
+                guard let v = Double(num) else { return nil }
+                switch ch { case "h": total += v * 3600; case "m": total += v * 60; case "s": total += v; default: return nil }
+                num = ""
+            }
+            if !num.isEmpty { guard let v = Double(num) else { return nil }; total += v }
+            return sign * total
+        }
+        let parts = t.split(separator: ":", omittingEmptySubsequences: false).map { Double($0) }
+        guard !parts.isEmpty, parts.count <= 3, parts.allSatisfy({ $0 != nil }) else { return nil }
+        let v = parts.map { $0! }
+        let total = v.reduce(0) { $0 * 60 + $1 }
+        return sign * total
     }
 
     static let dayFormatter: DateFormatter = {

@@ -41,7 +41,15 @@ final class Photo {
     var companions: [URL]
     let kind: FileKind
     let cr3: CR3Info?
-    let captureDate: Date
+    /// The camera's own clock, as in the file (also the key of the ingest history).
+    let cameraDate: Date
+    /// Seconds to add to this body's clock, so two cameras sort and name as one (set per body in the panel).
+    var clockOffset: TimeInterval = 0
+    /// When the photo was taken: the camera's clock plus the correction for this body.
+    var captureDate: Date { clockOffset == 0 ? cameraDate : cameraDate.addingTimeInterval(clockOffset) }
+    /// The camera body: its serial number, or the model when the file has none.
+    var body: String?
+    var model: String?
     /// The camera's time zone when the file records it (OffsetTime); otherwise the Mac's.
     var captureZone: TimeZone?
     let orientation: Int
@@ -50,13 +58,17 @@ final class Photo {
     var label: ColorLabel?
     var originalFileName: String
     var hasStoredOriginal = false
+    /// Protected in the camera (locked on the card).
+    var locked = false
+    /// Who is in this photo, when it differs from the job's Person shown (nil = the job's). May hold codes (\jb\).
+    var people: [String]?
 
     init(id: Int, url: URL, kind: FileKind, cr3: CR3Info?, captureDate: Date, orientation: Int, companions: [URL]) {
         self.id = id
         self.url = url
         self.kind = kind
         self.cr3 = cr3
-        self.captureDate = captureDate
+        self.cameraDate = captureDate
         self.orientation = orientation
         self.companions = companions
         self.originalFileName = url.lastPathComponent
@@ -90,14 +102,38 @@ final class Photo {
     var allFiles: [URL] { [url] + companions + (kind == .embedded ? [] : (sidecar.map { [$0] } ?? [])) }
 }
 
-enum ViewMode { case grid, loupe }
+enum ViewMode { case grid, loupe, compare }
+
+/// One camera body in the open folders.
+struct CameraBody: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let count: Int
+}
+
+/// Counters that change with almost every key press (tags, the selection). They are kept apart from the session,
+/// so a tag only updates the few texts in the panel that show a count: rebuilding the whole panel took most of
+/// the time of a key press.
+final class Counts: ObservableObject {
+    @Published var tagged = 0
+    @Published var selected = 0
+}
+
+/// What Write metadata, Rename and Copy work on.
+enum Scope: Hashable { case tagged, shown, selected, all }
 
 final class Session: ObservableObject {
     @Published private(set) var photos: [Photo] = []
     @Published private(set) var visible: [Photo] = []
     var currentIndex = 0
     @Published var onlyTagged = false
-    @Published private(set) var taggedCount = 0
+    /// Show only photos with at least this many stars (0 = any).
+    @Published var minRating = 0
+    /// Show only photos with this colour label (nil = any).
+    @Published var labelFilter: ColorLabel?
+    let counts = Counts()
+    /// Not published: `counts.tagged` is, and only the texts with a count follow it.
+    private(set) var taggedCount = 0 { didSet { if counts.tagged != taggedCount { counts.tagged = taggedCount } } }
     @Published var title = "No folder open"
     @Published var readOnly = false
     /// The open card or disk is locked (read-only volume), as opposed to a folder set as read-only.
@@ -110,18 +146,40 @@ final class Session: ObservableObject {
     var mode: ViewMode = .grid
     @Published var roots: [URL] = []
     @Published var lastRenameLog: URL?
+    /// The camera bodies in the open folders, for the clock corrections in the panel.
+    @Published var bodies: [CameraBody] = []
     @Published var lastCopyFolder: URL?
-    @Published var scopeTagged = true
+    /// Which photos Write metadata, Rename and Copy work on.
+    @Published var scope: Scope = .tagged
+    /// Photos selected with shift- or cmd-click (or ⌘A): key presses and actions work on all of them.
+    /// Not published (see `counts.selected`).
+    var selection = Set<ObjectIdentifier>() {
+        didSet {
+            if scope == .selected && selection.count < 2 { scope = .tagged }
+            if counts.selected != selection.count { counts.selected = selection.count }
+        }
+    }
+
+    var selectedPhotos: [Photo] { selection.isEmpty ? [] : visible.filter { selection.contains(ObjectIdentifier($0)) } }
     @Published var ingesting = false
     /// Asks the panel to open (and scroll to) the metadata template, for a pinned field that is still empty.
     @Published var openTemplate = false
 
     var currentPhoto: Photo? { visible.indices.contains(currentIndex) ? visible[currentIndex] : nil }
 
+    var filtering: Bool { onlyTagged || minRating > 0 || labelFilter != nil }
+
+    func passes(_ p: Photo) -> Bool {
+        (!onlyTagged || p.tagged) && p.rating >= minRating && (labelFilter == nil || p.label == labelFilter)
+    }
+
     func setPhotos(_ p: [Photo], roots: [URL]) {
         photos = p
         self.roots = roots
         onlyTagged = false
+        minRating = 0
+        labelFilter = nil
+        selection = []
         lockedVolume = false
         onCard = false
         currentIndex = 0
@@ -134,15 +192,21 @@ final class Session: ObservableObject {
     /// Rebuilds the visible list and keeps the same photo (or the nearest one) selected.
     func rebuildVisible(keeping keep: Photo?) {
         let oldIndex = currentIndex
-        visible = onlyTagged ? photos.filter { $0.tagged } : photos
+        visible = filtering ? photos.filter(passes) : photos
         if let k = keep, let i = visible.firstIndex(where: { $0 === k }) {
             currentIndex = i
         } else if let k = keep, let pos = photos.firstIndex(where: { $0 === k }) {
             // the photo drops out of the filter: take the next one that is still visible
-            let next = photos[pos...].first { p in visible.contains { $0 === p } }
+            let shown = Set(visible.map { ObjectIdentifier($0) })
+            let next = photos[pos...].first { shown.contains(ObjectIdentifier($0)) }
             currentIndex = next.flatMap { n in visible.firstIndex { $0 === n } } ?? max(0, visible.count - 1)
         } else {
             currentIndex = min(oldIndex, max(0, visible.count - 1))
+        }
+        // photos that are no longer shown are no longer selected
+        if !selection.isEmpty {
+            let kept = selection.intersection(visible.map { ObjectIdentifier($0) })
+            if kept.count != selection.count { selection = kept }
         }
     }
 
@@ -151,7 +215,40 @@ final class Session: ObservableObject {
     /// Adds a photo at the end (ingest delivers them in capture-time order).
     func append(_ p: Photo) {
         photos.append(p)
-        if !onlyTagged || p.tagged { visible.append(p) }
+        if passes(p) { visible.append(p) }
+        if p.tagged { taggedCount += 1 }
+    }
+
+    /// After a clock correction: shooting order again, with the same photo selected.
+    func resort(keeping keep: Photo?) {
+        photos.sort(by: Session.before)
+        rebuildVisible(keeping: keep)
+    }
+
+    /// Shooting order: capture time, then name (as the scanner sorts).
+    static func before(_ a: Photo, _ b: Photo) -> Bool {
+        if a.captureDate != b.captureDate { return a.captureDate < b.captureDate }
+        return a.name.localizedStandardCompare(b.name) == .orderedAscending
+    }
+
+    private static func insertionIndex(_ list: [Photo], _ p: Photo) -> Int {
+        var lo = 0, hi = list.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if before(list[mid], p) { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
+
+    /// Adds a photo in shooting order among the ones already there (a job folder that grows during an ingest);
+    /// the selected photo stays selected.
+    func insertSorted(_ p: Photo) {
+        photos.insert(p, at: Session.insertionIndex(photos, p))
+        if passes(p) {
+            let vi = Session.insertionIndex(visible, p)
+            visible.insert(p, at: vi)
+            if vi <= currentIndex && visible.count > 1 { currentIndex += 1 }
+        }
         if p.tagged { taggedCount += 1 }
     }
 }

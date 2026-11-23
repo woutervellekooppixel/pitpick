@@ -7,6 +7,13 @@ enum Scanner {
                                        "rw2", "pef", "srw", "3fr", "iiq", "x3f", "rwl", "erf", "mef", "mos", "dcr", "kdc"]
     static let embeddedExts: Set<String> = ["jpg", "jpeg", "heic", "heif", "tif", "tiff", "dng", "png"]
     static let maxFiles = 40000
+    /// Opening cards: a photo protected in the camera counts as tagged (set from the panel).
+    static var lockedIsTagged = true
+
+    static func isLocked(_ u: URL) -> Bool {
+        var st = stat()
+        return lstat(u.path, &st) == 0 && st.st_flags & UInt32(UF_IMMUTABLE) != 0
+    }
 
     struct Group {
         var dir: URL
@@ -37,6 +44,32 @@ enum Scanner {
         return out
     }
 
+    /// As collectFiles, with each file's size and date from the listing itself (for the index of a network folder;
+    /// on a local disk asking for them made reading a card slower).
+    static func collectFilesWithStamps(_ roots: [URL]) -> (files: [URL], stamps: [String: FolderIndex.Stamp]) {
+        var out: [URL] = []
+        var stamps: [String: FolderIndex.Stamp] = [:]
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        for root in roots {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue,
+                  let en = fm.enumerator(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
+            else { out += collectFiles([root]); continue }
+            for case let u as URL in en {
+                if en.level > 6 { en.skipDescendants(); continue }
+                let ext = u.pathExtension.lowercased()
+                guard rawExts.contains(ext) || embeddedExts.contains(ext) || ext == "xmp" else { continue }
+                out.append(u)
+                if let v = try? u.resourceValues(forKeys: Set(keys)), let size = v.fileSize, let m = v.contentModificationDate {
+                    stamps[u.path] = FolderIndex.Stamp(size: Int64(size), mtime: m.timeIntervalSince1970)
+                }
+                if out.count >= maxFiles { break }
+            }
+        }
+        return (out, stamps)
+    }
+
     static func group(_ files: [URL]) -> [Group] {
         var map: [String: Group] = [:]
         var order: [String] = []
@@ -54,12 +87,20 @@ enum Scanner {
         return order.compactMap { map[$0] }.filter { $0.raw != nil || !$0.images.isEmpty }
     }
 
-    static func load(_ groups: [Group], progress: @escaping (Int) -> Void) -> [Photo] {
+    /// `onCard`: the photos are on a memory card, so the camera's protect flag counts (see makePhoto).
+    static func load(_ groups: [Group], onCard: Bool = false, index: FolderIndex? = nil, stamps: [String: FolderIndex.Stamp] = [:],
+                     progress: @escaping (Int) -> Void) -> [Photo] {
         var results = [Photo?](repeating: nil, count: groups.count)
         let lock = NSLock()
         var done = 0
         DispatchQueue.concurrentPerform(iterations: groups.count) { i in
-            let p = makePhoto(id: i, groups[i])
+            var p: Photo?
+            if let idx = index, let known = idx.photo(id: i, groups[i], stamps: stamps) {
+                p = known
+            } else {
+                p = makePhoto(id: i, groups[i], onCard: onCard)
+                if let idx = index, let made = p { idx.remember(made, groups[i], stamps: stamps) }
+            }
             lock.lock()
             results[i] = p
             done += 1
@@ -83,7 +124,7 @@ enum Scanner {
         }
     }
 
-    static func makePhoto(id: Int, _ g: Group) -> Photo? {
+    static func makePhoto(id: Int, _ g: Group, onCard: Bool = false) -> Photo? {
         let main: URL
         var companions: [URL] = []
         var kind: FileKind
@@ -102,14 +143,21 @@ enum Scanner {
         var zone: TimeZone?
         var orientation = 1
         var cr3: CR3Info?
+        var locked = false
+        var serial: String?
+        var model: String?
         if kind == .cr3, let info = CR3.read(main) {
             cr3 = info
+            locked = info.locked
+            serial = info.serial
+            model = info.model
             orientation = info.orientation
             date = ExifDate.parse(info.dateTimeOriginal, subSec: info.subSec, offset: info.offsetTime)
             zone = info.offsetTime.flatMap(ExifDate.timeZone(from:))
         } else {
             if kind == .cr3 { kind = .raw }
-            if let r = imageIODate(main) { date = r.date; zone = r.zone }
+            if let r = imageIODate(main) { date = r.date; zone = r.zone; serial = r.serial; model = r.model }
+            if onCard { locked = isLocked(main) }
         }
         if date == nil {
             date = (try? main.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
@@ -117,6 +165,12 @@ enum Scanner {
         let photo = Photo(id: id, url: main, kind: kind, cr3: cr3, captureDate: date ?? Date.distantPast,
                           orientation: orientation, companions: companions)
         photo.captureZone = zone
+        photo.model = model
+        photo.body = (serial?.isEmpty == false ? serial : nil) ?? model
+        // the camera's own marks first (protected, stars given in the camera); an XMP goes over them
+        photo.locked = locked
+        if locked && lockedIsTagged && onCard { photo.tagged = true }
+        if let r = cr3?.rating, r > 0 { photo.rating = min(5, r) }
         var xmp: String?
         if kind == .embedded {
             xmp = embeddedXMP(main)
@@ -128,7 +182,7 @@ enum Scanner {
         return photo
     }
 
-    static func imageIODate(_ url: URL) -> (date: Date, zone: TimeZone?)? {
+    static func imageIODate(_ url: URL) -> (date: Date, zone: TimeZone?, serial: String?, model: String?)? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] else { return nil }
@@ -136,7 +190,8 @@ enum Scanner {
         guard let d = ExifDate.parse(exif[kCGImagePropertyExifDateTimeOriginal] as? String,
                                      subSec: exif[kCGImagePropertyExifSubsecTimeOriginal] as? String,
                                      offset: offset) else { return nil }
-        return (d, offset.flatMap(ExifDate.timeZone(from:)))
+        let model = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFModel] as? String
+        return (d, offset.flatMap(ExifDate.timeZone(from:)), exif[kCGImagePropertyExifBodySerialNumber] as? String, model)
     }
 
     /// The XMP inside a JPG, DNG, HEIC or TIFF. Cameras, Lightroom, Photo Mechanic and exiftool put it near
@@ -205,6 +260,11 @@ enum XMPState {
         if let o = first(preserved, s), !o.isEmpty {
             p.originalFileName = decode(o)
             p.hasStoredOriginal = true
+        }
+        // who is in the photo (compared with the job's after reading: the same means "as the job")
+        if s.contains("PersonInImage") {
+            let ppl = values("Iptc4xmpExt:PersonInImage", in: s)
+            if !ppl.isEmpty { p.people = ppl }
         }
     }
 }
