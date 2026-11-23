@@ -19,6 +19,22 @@ struct IngestResult {
     var suffixed = 0
     var bytes: Int64 = 0
     var errors: [String] = []
+    /// The destination ran out of space; the ingest stopped there (run it again to continue).
+    var diskFull = false
+}
+
+/// One photo of an ingest, planned before anything is copied.
+struct IngestJob {
+    let index: Int
+    let src: Photo
+    let main: URL
+    let side: URL?
+    let comps: [URL]
+    /// Already copied in an earlier run (same name and size).
+    let reuse: Bool
+    let suffixed: Bool
+    /// Bytes still to copy (0 when reused).
+    let bytes: Int64
 }
 
 enum FileOps {
@@ -42,29 +58,11 @@ enum FileOps {
     /// `onPhoto` receives the copies in capture order as soon as all earlier photos are in, so culling can
     /// start while the rest is still copying. A file that is already there with the same size counts as
     /// ingested before (resume); a different file with the same name gets -2, -3.
-    static func ingest(_ sources: [Photo], to dest: URL, name: (Photo, Int) -> String,
-                       metadata: ((Photo) -> [String])?, cancelled: () -> Bool,
-                       onPhoto: @escaping (Photo) -> Void) -> IngestResult {
+    /// Plans every target name, in capture order. A file that is already there with the same size counts
+    /// as ingested before (resume); a different file with the same name gets -2, -3. Nothing is written.
+    static func planIngest(_ sources: [Photo], to dest: URL, name: (Photo, Int) -> String) -> [IngestJob] {
         let fm = FileManager.default
-        var r = IngestResult()
-        do {
-            try fm.createDirectory(at: dest, withIntermediateDirectories: true)
-        } catch {
-            r.errors.append("Cannot create \(dest.path): \(error.localizedDescription)")
-            return r
-        }
-
-        // 1. Plan every target name, in capture order.
-        struct Job {
-            let index: Int
-            let src: Photo
-            let main: URL
-            let side: URL?
-            let comps: [URL]
-            let reuse: Bool
-            let suffixed: Bool
-        }
-        var jobs: [Job] = []
+        var jobs: [IngestJob] = []
         var claimed = Set<String>()
         for (i, src) in sources.enumerated() {
             let base = safeFileName(name(src, i + 1))
@@ -88,8 +86,51 @@ enum FileOps {
             claimed.insert(main.path.lowercased())
             if let s = side { claimed.insert(s.path.lowercased()) }
             comps.forEach { claimed.insert($0.path.lowercased()) }
-            jobs.append(Job(index: i, src: src, main: main, side: side, comps: comps, reuse: reuse, suffixed: b != base))
+            let bytes = reuse ? 0 : max(0, size) + src.companions.reduce(Int64(0)) { $0 + max(0, fileSize($1)) }
+            jobs.append(IngestJob(index: i, src: src, main: main, side: side, comps: comps, reuse: reuse, suffixed: b != base, bytes: bytes))
         }
+        return jobs
+    }
+
+    /// Copies under a hidden temporary name and renames when complete, so an interrupted copy
+    /// (power cut, crash) can never sit under the real name. A leftover temporary file from an
+    /// earlier interrupted run is Pitpick's own and gets replaced. Never overwrites a real file.
+    static func copyAtomically(_ from: URL, to: URL) throws {
+        let fm = FileManager.default
+        let tmp = to.deletingLastPathComponent().appendingPathComponent("." + to.lastPathComponent + ".pitpick-partial")
+        if fm.fileExists(atPath: tmp.path) { try fm.removeItem(at: tmp) }
+        try fm.copyItem(at: from, to: tmp)
+        do {
+            try fm.moveItem(at: tmp, to: to)
+        } catch {
+            try? fm.removeItem(at: tmp)
+            throw error
+        }
+    }
+
+    /// The destination is full (Cocoa or POSIX error, possibly wrapped).
+    static func isDiskFull(_ e: Error) -> Bool {
+        let ns = e as NSError
+        if ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteOutOfSpaceError { return true }
+        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOSPC) { return true }
+        if let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError { return isDiskFull(u) }
+        return false
+    }
+
+    static func ingest(_ sources: [Photo], to dest: URL, name: (Photo, Int) -> String,
+                       metadata: ((Photo) -> [String])?, cancelled: () -> Bool,
+                       onPhoto: @escaping (Photo) -> Void) -> IngestResult {
+        let fm = FileManager.default
+        var r = IngestResult()
+        do {
+            try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        } catch {
+            r.errors.append("Cannot create \(dest.path): \(error.localizedDescription)")
+            return r
+        }
+
+        // 1. Plan every target name, in capture order.
+        let jobs = planIngest(sources, to: dest, name: name)
 
         // 2. Metadata and hand-over on one serial queue. A photo is handed over once every earlier one is,
         //    so the grid fills in capture order even when one card is ahead of the other.
@@ -108,7 +149,7 @@ enum FileOps {
         func note(_ change: (inout IngestResult) -> Void) { lock.lock(); change(&r); lock.unlock() }
 
         // 3. One copy stream per card, all at the same time; each card in capture order.
-        var byVolume: [String: [Job]] = [:]
+        var byVolume: [String: [IngestJob]] = [:]
         var volumeOrder: [String] = []
         for job in jobs {
             let key = volumeKey(job.src.url)
@@ -116,13 +157,17 @@ enum FileOps {
             byVolume[key, default: []].append(job)
         }
         let streams = volumeOrder.map { byVolume[$0]! }
+        var full = false   // the destination ran out of space: every stream stops
         DispatchQueue.concurrentPerform(iterations: streams.count) { s in
             for job in streams[s] {
-                if cancelled() { break }
+                lock.lock(); let stop = full; lock.unlock()
+                if stop || cancelled() { break }
                 let src = job.src
                 if job.reuse {
                     // copied in an earlier run: show it as it is, with its own XMP
+                    // (a JPG twin that did not make it last time, for example on a full disk, is copied now)
                     note { $0.alreadyThere += 1 }
+                    for (c, t) in zip(src.companions, job.comps) where !fm.fileExists(atPath: t.path) { try? copyAtomically(c, to: t) }
                     let xmp = job.side.flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
                     let g = Scanner.Group(dir: dest, raw: src.kind == .embedded ? nil : job.main,
                                           images: src.kind == .embedded ? [job.main] + job.comps : job.comps, xmp: xmp)
@@ -131,13 +176,23 @@ enum FileOps {
                     continue
                 }
                 do {
-                    try fm.copyItem(at: src.url, to: job.main)
-                    for (c, t) in zip(src.companions, job.comps) where !fm.fileExists(atPath: t.path) { try fm.copyItem(at: c, to: t) }
+                    try copyAtomically(src.url, to: job.main)
+                    for (c, t) in zip(src.companions, job.comps) where !fm.fileExists(atPath: t.path) { try copyAtomically(c, to: t) }
                     if let sc = src.sidecar, let t = job.side, fm.fileExists(atPath: sc.path), !fm.fileExists(atPath: t.path) {
-                        try fm.copyItem(at: sc, to: t)
+                        try copyAtomically(sc, to: t)
                     }
                 } catch {
-                    note { $0.errors.append("\(src.name): \(error.localizedDescription)") }
+                    if isDiskFull(error) {
+                        lock.lock()
+                        if !full {
+                            full = true
+                            r.diskFull = true
+                            r.errors.append("The destination disk is full. Free up space and run Ingest again: it continues where it stopped.")
+                        }
+                        lock.unlock()
+                    } else {
+                        note { $0.errors.append("\(src.name): \(error.localizedDescription)") }
+                    }
                     after.async { handOver(job.index, nil) }
                     continue
                 }
@@ -239,33 +294,48 @@ enum FileOps {
         }
     }
 
-    /// Renames and writes a log for undo. Updates the photos.
-    static func executeRename(_ items: [RenameItem]) -> (done: Int, errors: [String], log: URL?) {
+    /// Where a photo's files are after a rename, to apply on the main thread.
+    struct RenameUpdate {
+        let photo: Photo
+        let url: URL
+        let sidecar: URL?
+        let companions: [URL]
+    }
+
+    /// Moves the files and writes a log for undo. Changes no Photo, so it can run off the main thread;
+    /// apply the updates afterwards with `apply`.
+    static func performRename(_ items: [RenameItem], progress: ((Int) -> Void)? = nil)
+        -> (done: Int, errors: [String], log: URL?, updates: [RenameUpdate]) {
         var moves: [Move] = []
         var errors: [String] = []
+        var updates: [RenameUpdate] = []
         var done = 0
-        for it in items {
+        for (k, it) in items.enumerated() {
             let p = it.photo
-            var pairs: [(URL, URL)] = [(p.url, it.main)]
-            if let s = p.sidecar, let t = it.sidecar { pairs.append((s, t)) }
-            for (c, t) in zip(p.companions, it.companions) { pairs.append((c, t)) }
+            var url = p.url, side = p.sidecar, comps = p.companions
+            // -1 = the photo, -2 = its XMP, 0... = a companion (JPG twin)
+            var pairs: [(from: URL, to: URL, which: Int)] = [(p.url, it.main, -1)]
+            if let s = p.sidecar, let t = it.sidecar { pairs.append((s, t, -2)) }
+            for (i, (c, t)) in zip(p.companions, it.companions).enumerated() { pairs.append((c, t, i)) }
             var ok = true
-            for (f, t) in pairs {
+            for pair in pairs {
                 do {
-                    try move(f, t)
-                    moves.append(Move(from: f.path, to: t.path))
+                    try move(pair.from, pair.to)
+                    moves.append(Move(from: pair.from.path, to: pair.to.path))
+                    switch pair.which {
+                    case -1: url = pair.to
+                    case -2: side = pair.to
+                    default: comps[pair.which] = pair.to
+                    }
                 } catch {
-                    errors.append("\(f.lastPathComponent): \(error.localizedDescription)")
+                    errors.append("\(pair.from.lastPathComponent): \(error.localizedDescription)")
                     ok = false
                     break
                 }
             }
-            for (f, t) in pairs where moves.contains(where: { $0.from == f.path && $0.to == t.path }) {
-                if f == p.url { p.url = t }
-                else if f == p.sidecar { p.sidecar = t }
-                else if let i = p.companions.firstIndex(of: f) { p.companions[i] = t }
-            }
+            updates.append(RenameUpdate(photo: p, url: url, sidecar: side, companions: comps))
             if ok { done += 1 }
+            if (k + 1) % 50 == 0 { progress?(k + 1) }
         }
         var logURL: URL?
         if !moves.isEmpty {
@@ -275,7 +345,23 @@ enum FileOps {
             let url = logDir.appendingPathComponent("renamed-\(f.string(from: Date())).json")
             if let d = try? JSONEncoder().encode(moves), (try? d.write(to: url)) != nil { logURL = url }
         }
-        return (done, errors, logURL)
+        return (done, errors, logURL, updates)
+    }
+
+    /// Points the photos at their new names (main thread).
+    static func apply(_ updates: [RenameUpdate]) {
+        for u in updates {
+            u.photo.url = u.url
+            u.photo.sidecar = u.sidecar
+            u.photo.companions = u.companions
+        }
+    }
+
+    /// Renames, writes a log for undo and updates the photos, all on the calling thread.
+    static func executeRename(_ items: [RenameItem]) -> (done: Int, errors: [String], log: URL?) {
+        let r = performRename(items)
+        apply(r.updates)
+        return (r.done, r.errors, r.log)
     }
 
     /// Undoes a rename, in reverse order. Skips whatever no longer matches.
@@ -332,9 +418,9 @@ enum FileOps {
                 continue
             }
             do {
-                try fm.copyItem(at: p.url, to: main)
-                for (c, t) in zip(p.companions, comps) { try fm.copyItem(at: c, to: t) }
-                if let s = p.sidecar, let t = side, fm.fileExists(atPath: s.path) { try fm.copyItem(at: s, to: t) }
+                try copyAtomically(p.url, to: main)
+                for (c, t) in zip(p.companions, comps) { try copyAtomically(c, to: t) }
+                if let s = p.sidecar, let t = side, fm.fileExists(atPath: s.path) { try copyAtomically(s, to: t) }
                 all.forEach { claimed.insert($0.path.lowercased()) }
                 copied.append(CopyPlanItem(photo: p, main: main, sidecar: side, companions: comps))
             } catch {

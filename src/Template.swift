@@ -61,7 +61,11 @@ struct PadValues: Codable, Equatable {
     var values: [String: String] = Dictionary(uniqueKeysWithValues: Fields.all.map { ($0.key, $0.initial) })
     var date = ""
     var folderTemplate = "{date}_{event}-{location}"
-    var fileTemplate = "{shootdate}_{time}_{event}-{location}-{city}_{photographer}"
+    /// The camera's frame number at the end keeps frames shot in the same second in shooting order.
+    var fileTemplate = PadValues.defaultFileTemplate
+    static let defaultFileTemplate = "{shootdate}_{time}_{event}-{location}-{city}_{photographer}_{frame}"
+    /// The default of versions 1.2-1.3.2, without the frame number: moved to the new default when found.
+    static let oldDefaultFileTemplate = "{shootdate}_{time}_{event}-{location}-{city}_{photographer}"
     var rawFolder = "raw"
     var labels = "Red, Yellow, Green, Blue, Purple"
     /// Spaces in folder and file names become dashes: "Ziggo Dome" -> "Ziggo-Dome".
@@ -78,6 +82,8 @@ struct PadValues: Codable, Equatable {
         date = try c.decodeIfPresent(String.self, forKey: .date) ?? d.date
         folderTemplate = try c.decodeIfPresent(String.self, forKey: .folderTemplate) ?? d.folderTemplate
         fileTemplate = try c.decodeIfPresent(String.self, forKey: .fileTemplate) ?? d.fileTemplate
+        // 1.2-1.3.2 default without the frame number: frames in the same second did not sort (1.4)
+        if fileTemplate == PadValues.oldDefaultFileTemplate { fileTemplate = PadValues.defaultFileTemplate }
         rawFolder = try c.decodeIfPresent(String.self, forKey: .rawFolder) ?? d.rawFolder
         labels = try c.decodeIfPresent(String.self, forKey: .labels) ?? d.labels
         spacesToDashes = try c.decodeIfPresent(Bool.self, forKey: .spacesToDashes) ?? d.spacesToDashes
@@ -116,18 +122,47 @@ struct PadValues: Codable, Equatable {
         return out
     }
 
+    /// The job date as yyyy-MM-dd, also when typed as 19-11-2026, 19/11/2026, 19.11.2026 or 20261119.
+    /// nil when it is empty or not clear.
+    var isoDate: String? {
+        let d = date.trimmingCharacters(in: .whitespaces)
+        guard !d.isEmpty else { return nil }
+        let parts = d.split(whereSeparator: { "-/. ".contains($0) }).map(String.init)
+        var y = 0, m = 0, day = 0
+        if parts.count == 3, let a = Int(parts[0]), let b = Int(parts[1]), let c = Int(parts[2]) {
+            if parts[0].count == 4 { y = a; m = b; day = c } else if parts[2].count == 4 { y = c; m = b; day = a } else { return nil }
+        } else if parts.count == 1, d.count == 8, let v = Int(d) {
+            y = v / 10000; m = (v / 100) % 100; day = v % 100
+        } else {
+            return nil
+        }
+        guard (1900...2200).contains(y), (1...12).contains(m), (1...31).contains(day) else { return nil }
+        return String(format: "%04d-%02d-%02d", y, m, day)
+    }
+
+    /// A date that is filled in but cannot be read, for a clear message instead of a wrong name.
+    var dateProblem: String? {
+        let d = date.trimmingCharacters(in: .whitespaces)
+        guard !d.isEmpty, isoDate == nil else { return nil }
+        return "The date \"\(d)\" is not clear: write it as 2026-11-19."
+    }
+
     private func token(_ name: String, photo: Photo?, seq: Int, depth: Int) -> String? {
-        let parts = date.split(separator: "-").map(String.init)
+        let iso = isoDate ?? date
+        let parts = iso.split(separator: "-").map(String.init)
         switch name {
-        case "date": return date
-        case "date-dmy": return parts.count == 3 ? "\(parts[2])-\(parts[1])-\(parts[0])" : date
+        case "date": return iso
+        case "date-dmy": return parts.count == 3 ? "\(parts[2])-\(parts[1])-\(parts[0])" : iso
         case "year": return parts.first ?? ""
         case "month": return parts.count > 1 ? parts[1] : ""
         case "day": return parts.count > 2 ? parts[2] : ""
-        case "frame": return photo?.frameNumber ?? "3777"
+        case "frame":
+            // a camera name without digits at the end: the whole original name, so the name stays unique
+            guard let p = photo else { return "3777" }
+            return p.frameNumber.isEmpty ? p.originalBase : p.frameNumber
         case "filename": return photo?.originalBase ?? "IMG_3777"
         case "seq": return String(format: "%04d", seq)
-        case "shootdate": return photo?.shootDate ?? (date.isEmpty ? "2026-11-19" : date)
+        case "shootdate": return photo?.shootDate ?? (iso.isEmpty ? "2026-11-19" : iso)
         case "time": return photo?.shootTime ?? "21-04-37"
         default:
             guard Fields.byKey[name] != nil, depth < 4 else { return nil }
@@ -158,8 +193,26 @@ struct PadValues: Codable, Equatable {
     func tidy(_ s: String) -> String {
         let clean = safeFileName(s)
         guard spacesToDashes else { return clean }
-        return clean.replacingOccurrences(of: #"\s*-\s*"#, with: "-", options: .regularExpression)
+        // "AC/DC: Live?" becomes AC-DC-Live, not AC-DC-Live--
+        return safeFileName(clean.replacingOccurrences(of: #"\s*-\s*"#, with: "-", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: "-", options: .regularExpression)
+            .replacingOccurrences(of: #"-{2,}"#, with: "-", options: .regularExpression))
+    }
+
+    /// Tokens that are neither a field nor a date or photo token (a typo such as {evnt}), as written.
+    func unknownTokens(in texts: [String]) -> [String] {
+        var out: [String] = []
+        for t in texts {
+            let ns = t as NSString
+            for m in Self.tokenRegex.matches(in: t, range: NSRange(location: 0, length: ns.length)) {
+                let raw = ns.substring(with: m.range(at: 1)).lowercased()
+                let name = Fields.aliases[raw] ?? raw
+                if Fields.byKey[name] != nil || Fields.dateTokens.contains(name) || Fields.photoTokens.contains(name) { continue }
+                let shown = ns.substring(with: m.range)
+                if !out.contains(shown) { out.append(shown) }
+            }
+        }
+        return out
     }
 
     /// exiftool arguments for every field that has a value. Empty fields are left alone.
@@ -275,6 +328,11 @@ final class Pad: ObservableObject {
 
     func togglePin(_ key: String) {
         if pinned.contains(key) { pinned.remove(key) } else { pinned.insert(key) }
+    }
+
+    /// 19-11-2026 typed in the date field becomes 2026-11-19.
+    func normalizeDate() {
+        if let iso = v.isoDate, iso != v.date { v.date = iso }
     }
 
     /// Clears the per-job fields (the ones without a pin).

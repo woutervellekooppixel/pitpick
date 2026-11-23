@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.3.2</string>
+    <string>1.4</string>
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>7</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
@@ -27,7 +27,7 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHumanReadableCopyright</key>
-    <string>Free and open source. By Wouter Vellekoop.</string>
+    <string>Free and open source. By Wouter Vellekoop. Uses ExifTool and libjpeg-turbo; based in part on the work of the Independent JPEG Group.</string>
     <key>NSRemovableVolumesUsageDescription</key>
     <string>Pitpick reads your photos from the memory card.</string>
     <key>NSNetworkVolumesUsageDescription</key>

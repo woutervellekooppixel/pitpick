@@ -34,6 +34,20 @@ final class ExifTool {
 
     var isAvailable: Bool { ExifTool.locate() != nil }
 
+    /// Starts exiftool in the background right after launch and loads its XMP writer (about 40 + 70 ms),
+    /// so the first tag or the first ingested photo does not wait for it. The test write goes to a file of
+    /// Pitpick's own in the temporary folder.
+    private var warmedUp = false
+
+    func warmUp() {
+        queue.async {
+            guard !self.warmedUp, self.ensureStarted() else { return }
+            self.warmedUp = true
+            let x = FileManager.default.temporaryDirectory.appendingPathComponent("pitpick-warm-up.xmp").path
+            _ = self.execute([["-overwrite_original", "-XMP-xmp:Rating=0", x]], progress: nil)
+        }
+    }
+
     private func ensureStarted() -> Bool {
         if let p = process, p.isRunning { return true }
         guard let (exe, pre) = ExifTool.locate() else { return false }
@@ -59,8 +73,11 @@ final class ExifTool {
         return true
     }
 
-    private func readUntil(_ marker: String) -> String? {
+    /// Reads exiftool's answer up to the marker. If exiftool hangs, it is stopped after `timeout`
+    /// seconds and the next command starts a fresh one, so the app never waits forever.
+    private func readUntil(_ marker: String, timeout: Double = 60) -> String? {
         let m = Data(marker.utf8)
+        let deadline = Date().addingTimeInterval(timeout)
         while true {
             if let r = outBuffer.range(of: m) {
                 let text = String(data: outBuffer.subdata(in: outBuffer.startIndex..<r.lowerBound), encoding: .utf8) ?? ""
@@ -70,6 +87,17 @@ final class ExifTool {
                 return text
             }
             guard let out = output else { return nil }
+            var pfd = pollfd(fd: out.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            let left = Int32(max(0, deadline.timeIntervalSinceNow) * 1000)
+            let ready = left > 0 ? poll(&pfd, 1, left) : 0
+            if ready < 0 && errno == EINTR { continue }
+            if ready <= 0 {
+                process?.terminate()
+                process = nil
+                output = nil
+                outBuffer = Data()
+                return nil
+            }
             let d = out.availableData
             if d.isEmpty { return nil }
             outBuffer.append(d)
@@ -156,12 +184,15 @@ final class StateWriter {
     private var pending: [Int: Photo] = [:]
     private var timer: Timer?
     var enabled = true
+    /// While files are being renamed: keep the changes and write them afterwards, to the new names.
+    var paused = false
     var labelNames: () -> [String] = { ["Red", "Yellow", "Green", "Blue", "Purple"] }
     var onError: ((String) -> Void)?
 
     func schedule(_ p: Photo) {
         guard enabled else { return }
         pending[p.id] = p
+        guard !paused else { return }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in self?.flush() }
     }
@@ -169,6 +200,7 @@ final class StateWriter {
     func flush(wait: Bool = false) {
         timer?.invalidate()
         timer = nil
+        if paused { return }
         let photos = Array(pending.values)
         pending.removeAll()
         if photos.isEmpty {

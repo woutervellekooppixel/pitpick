@@ -100,6 +100,8 @@ final class Session: ObservableObject {
     @Published private(set) var taggedCount = 0
     @Published var title = "No folder open"
     @Published var readOnly = false
+    /// The open card or disk is locked (read-only volume), as opposed to a folder set as read-only.
+    @Published var lockedVolume = false
     @Published var loading: String?
     @Published var busy: String?
     @Published var message: String?
@@ -118,6 +120,7 @@ final class Session: ObservableObject {
         photos = p
         self.roots = roots
         onlyTagged = false
+        lockedVolume = false
         currentIndex = 0
         lastRenameLog = nil
         message = nil

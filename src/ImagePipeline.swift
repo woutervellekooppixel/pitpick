@@ -1,20 +1,26 @@
-// Getting images: grid thumbnails from the PRVW, screen and 100% images from the camera JPEG.
-// Decoding runs on two threads in order of importance: the current photo first,
-// then the photos in the browsing direction. The Mac's JPEG decoder does not scale in parallel.
+// Getting images: grid thumbnails and loupe stand-ins from the PRVW, screen and 100% images from the camera JPEG.
+// The Mac's hardware JPEG decoder handles one image at a time (about 25 screen images a second). On Apple
+// Silicon, libjpeg-turbo decodes on three more threads next to it, so fast browsing stays sharp and 100% comes
+// sooner. Order of importance: the 100% image when zoomed, the current photo, the photos in the browsing
+// direction, then the 100% images of the neighbours (zoomed browsing) and of the photo you are looking at.
 import Foundation
 import ImageIO
 import CoreGraphics
+import IOSurface
 
 final class Decoded {
     let image: CGImage
     /// Pixel size of the full image (for CR3: unrotated, the orientation comes from the photo).
     let fullSize: CGSize
     let isFull: Bool
+    /// Set when libjpeg-turbo decoded it: the loupe shows the surface itself, without a copy.
+    let surface: IOSurfaceRef?
 
-    init(image: CGImage, fullSize: CGSize, isFull: Bool) {
+    init(image: CGImage, fullSize: CGSize, isFull: Bool, surface: IOSurfaceRef? = nil) {
         self.image = image
         self.fullSize = fullSize
         self.isFull = isFull
+        self.surface = surface
     }
 }
 
@@ -73,10 +79,36 @@ enum ImageDecoder {
         return imageIOThumb(r, maxPixels: maxPixels)
     }
 
-    /// Screen-size image: the camera JPEG at half resolution (4096 px on a Canon R5 II).
-    static func screen(_ r: SourceRef) -> Decoded? {
+    /// The loupe's stand-in while the screen image is on its way: the camera's PRVW (1620x1080 on a CR3),
+    /// decoded in software, so it never waits for the hardware decoder. Much sharper than a grid thumbnail.
+    static func preview(_ r: SourceRef) -> Decoded? {
         if r.kind == .cr3 {
-            guard let d = readJPEG(r, preview: false), let src = CGImageSourceCreateWithData(d as CFData, nil) else { return nil }
+            guard let d = readJPEG(r, preview: true) else { return nil }
+            if let t = TurboDecoder.forThisThread, let res = t.decode(d, scale: { _, _ in 1 }) {
+                return Decoded(image: res.image, fullSize: CGSize(width: res.width, height: res.height), isFull: false, surface: res.surface)
+            }
+            guard let src = CGImageSourceCreateWithData(d as CFData, nil) else { return nil }
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1620,
+                kCGImageSourceCreateThumbnailWithTransform: false,
+                kCGImageSourceShouldCacheImmediately: true,
+            ]
+            guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+            return Decoded(image: img, fullSize: pixelSize(src), isFull: false)
+        }
+        return imageIOThumb(r, maxPixels: 1620)
+    }
+
+    /// Screen-size image: the camera JPEG at half resolution (4096 px on a Canon R5 II).
+    /// With a TurboDecoder in software, otherwise through ImageIO (the hardware decoder).
+    static func screen(_ r: SourceRef, turbo: TurboDecoder? = nil) -> Decoded? {
+        if r.kind == .cr3 {
+            guard let d = readJPEG(r, preview: false) else { return nil }
+            if let t = turbo, let res = t.decode(d, scale: { w, _ in w > 5000 ? 2 : 1 }) {
+                return Decoded(image: res.image, fullSize: CGSize(width: res.width, height: res.height), isFull: res.image.width >= res.width, surface: res.surface)
+            }
+            guard let src = CGImageSourceCreateWithData(d as CFData, nil) else { return nil }
             let size = pixelSize(src)
             let factor = size.width > 5000 ? 2 : 1
             let opts: [CFString: Any] = [kCGImageSourceSubsampleFactor: factor, kCGImageSourceShouldCacheImmediately: true]
@@ -88,10 +120,14 @@ enum ImageDecoder {
     }
 
     /// Full resolution for the 100% view.
-    static func full(_ r: SourceRef) -> Decoded? {
+    static func full(_ r: SourceRef, turbo: TurboDecoder? = nil) -> Decoded? {
         if r.kind == .cr3 {
-            guard let d = readJPEG(r, preview: false), let src = CGImageSourceCreateWithData(d as CFData, nil) else { return nil }
-            guard let img = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
+            guard let d = readJPEG(r, preview: false) else { return nil }
+            if let t = turbo, let res = t.decode(d, scale: { _, _ in 1 }) {
+                return Decoded(image: res.image, fullSize: CGSize(width: res.width, height: res.height), isFull: true, surface: res.surface)
+            }
+            guard let src = CGImageSourceCreateWithData(d as CFData, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
             return Decoded(image: img, fullSize: CGSize(width: img.width, height: img.height), isFull: true)
         }
         guard let src = CGImageSourceCreateWithURL(r.url as CFURL, nil) else { return nil }
@@ -102,20 +138,47 @@ enum ImageDecoder {
     }
 }
 
+/// A 100% image to prepare. Urgent: the photo you zoomed into. Otherwise: its neighbours while zoomed,
+/// or the photo you are looking at, so space or a click shows 100% at once.
+struct FullRequest {
+    let ref: SourceRef
+    let urgent: Bool
+}
+
 final class ImagePipeline {
     var onThumbReady: ((Int) -> Void)?
+    var onPreviewReady: ((Int) -> Void)?
     var onScreenReady: ((Int) -> Void)?
     var onFullReady: ((Int) -> Void)?
 
     let thumbPixels = 384
     let screenCapacity = 12
+    /// 100% images kept (about 180 MB each on an R5 II): the current photo and its neighbours.
+    let fullCapacity = ProcessInfo.processInfo.physicalMemory >= 16 << 30 ? 3 : 2
 
-    // grid thumbnails
+    /// Decoding threads, true = libjpeg-turbo. Apple Silicon: the hardware decoder plus three in software.
+    /// PITPICK_DECODERS=hw,turbo,... overrides it (for measuring).
+    static let decoderPlan: [Bool] = {
+        if let s = ProcessInfo.processInfo.environment["PITPICK_DECODERS"], !s.isEmpty {
+            return s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) == "turbo" }
+        }
+        #if TURBO
+        return [false, true, true, true]
+        #else
+        return [false, false]
+        #endif
+    }()
+
+    // grid thumbnails and loupe stand-ins (software, several at once)
     private let thumbCache = NSCache<NSNumber, Decoded>()
     private let thumbQueue = OperationQueue()
     private let thumbLock = NSLock()
     private var thumbPending = Set<Int>()
     private var thumbWanted = Set<Int>()
+    private let previewCache = NSCache<NSNumber, Decoded>()
+    private let previewQueue = OperationQueue()
+    private var previewPending = Set<Int>()
+    private var previewWanted = Set<Int>()
 
     // screen images and 100%
     private let cond = NSCondition()
@@ -124,20 +187,25 @@ final class ImagePipeline {
     private var wanted: [SourceRef] = []
     private var inFlight = Set<Int>()
     private var failed = Set<Int>()
-    private var fullWanted: SourceRef?
-    private var fullImage: Decoded?
-    private var fullID: Int?
-    private var fullInFlight = false
+    private var fullWanted: [FullRequest] = []
+    private var fullCache: [Int: Decoded] = [:]
+    private var fullOrder: [Int] = []
+    private var fullInFlight = Set<Int>()
     private var fullFailed = Set<Int>()
     private var generation = 0
+    private let hasTurbo: Bool
 
     init() {
         thumbCache.totalCostLimit = 900 * 1024 * 1024
         thumbQueue.maxConcurrentOperationCount = 4
         thumbQueue.qualityOfService = .userInitiated
-        for i in 0..<2 {
-            let t = Thread { [unowned self] in self.workerLoop() }
-            t.name = "pitpick-decode-\(i)"
+        previewCache.totalCostLimit = 120 * 1024 * 1024   // about 17 stand-ins of 7 MB
+        previewQueue.maxConcurrentOperationCount = 3
+        previewQueue.qualityOfService = .userInitiated
+        hasTurbo = ImagePipeline.decoderPlan.contains(true) && TurboDecoder() != nil
+        for (i, useTurbo) in ImagePipeline.decoderPlan.enumerated() {
+            let t = Thread { [unowned self] in self.workerLoop(turbo: useTurbo ? TurboDecoder() : nil) }
+            t.name = "pitpick-decode-\(i)\(useTurbo ? "-turbo" : "")"
             t.qualityOfService = .userInteractive
             t.start()
         }
@@ -155,20 +223,32 @@ final class ImagePipeline {
         screenOrder.removeAll()
         wanted.removeAll()
         failed.removeAll()
-        fullWanted = nil
-        fullImage = nil
-        fullID = nil
+        fullWanted.removeAll()
+        fullCache.removeAll()
+        fullOrder.removeAll()
         fullFailed.removeAll()
         cond.unlock()
         thumbQueue.cancelAllOperations()
+        previewQueue.cancelAllOperations()
         thumbLock.lock()
         thumbPending.removeAll()
         thumbWanted.removeAll()
+        previewPending.removeAll()
+        previewWanted.removeAll()
         thumbLock.unlock()
         thumbCache.removeAllObjects()
+        previewCache.removeAllObjects()
     }
 
-    // MARK: rastertegels
+    /// After a rename: decodes that failed because a file was being moved may run again.
+    func clearFailures() {
+        cond.lock()
+        failed.removeAll()
+        fullFailed.removeAll()
+        cond.unlock()
+    }
+
+    // MARK: grid thumbnails
 
     func thumb(_ id: Int) -> Decoded? { thumbCache.object(forKey: NSNumber(value: id)) }
 
@@ -203,7 +283,50 @@ final class ImagePipeline {
         DispatchQueue.main.async { [weak self] in self?.onThumbReady?(r.id) }
     }
 
-    // MARK: schermbeelden
+    // MARK: loupe stand-ins
+
+    func preview(_ id: Int) -> Decoded? { previewCache.object(forKey: NSNumber(value: id)) }
+
+    /// Requests the PRVW stand-ins in the browsing direction; a photo whose screen image is ready is skipped.
+    func requestPreviews(_ refs: [SourceRef]) {
+        let gen = currentGeneration
+        var todo: [SourceRef] = []
+        thumbLock.lock()
+        previewWanted = Set(refs.map { $0.id })
+        for r in refs where previewCache.object(forKey: NSNumber(value: r.id)) == nil && !previewPending.contains(r.id) {
+            previewPending.insert(r.id)
+            todo.append(r)
+        }
+        thumbLock.unlock()
+        for r in todo {
+            previewQueue.addOperation { [weak self] in self?.runPreview(r, gen) }
+        }
+    }
+
+    private func hasScreen(_ id: Int) -> Bool {
+        cond.lock(); defer { cond.unlock() }
+        return screenCache[id] != nil
+    }
+
+    private func runPreview(_ r: SourceRef, _ gen: Int) {
+        thumbLock.lock()
+        let still = previewWanted.contains(r.id)
+        if !still { previewPending.remove(r.id) }
+        thumbLock.unlock()
+        guard still, gen == currentGeneration, !hasScreen(r.id) else {
+            thumbLock.lock(); previewPending.remove(r.id); thumbLock.unlock()
+            return
+        }
+        let d = ImageDecoder.preview(r)
+        thumbLock.lock()
+        previewPending.remove(r.id)
+        thumbLock.unlock()
+        guard let img = d, gen == currentGeneration else { return }
+        previewCache.setObject(img, forKey: NSNumber(value: r.id), cost: img.image.bytesPerRow * img.image.height)
+        DispatchQueue.main.async { [weak self] in self?.onPreviewReady?(r.id) }
+    }
+
+    // MARK: screen images and 100%
 
     func screen(_ id: Int) -> Decoded? {
         cond.lock(); defer { cond.unlock() }
@@ -214,7 +337,9 @@ final class ImagePipeline {
 
     func full(_ id: Int) -> Decoded? {
         cond.lock(); defer { cond.unlock() }
-        return fullID == id ? fullImage : nil
+        guard let d = fullCache[id] else { return nil }
+        if let i = fullOrder.firstIndex(of: id) { fullOrder.remove(at: i); fullOrder.append(id) }
+        return d
     }
 
     func want(_ refs: [SourceRef]) {
@@ -224,39 +349,61 @@ final class ImagePipeline {
         cond.unlock()
     }
 
-    func wantFull(_ ref: SourceRef?) {
+    /// The 100% images to prepare, most important first. Images already made stay until they are pushed out.
+    func wantFull(_ requests: [FullRequest]) {
         cond.lock()
-        fullWanted = ref
-        if ref == nil { fullImage = nil; fullID = nil }
+        fullWanted = requests
         cond.broadcast()
         cond.unlock()
     }
 
-    private func workerLoop() {
+    /// Back in the grid: no 100% images needed, give the memory back.
+    func releaseFulls() {
+        cond.lock()
+        fullWanted.removeAll()
+        fullCache.removeAll()
+        fullOrder.removeAll()
+        cond.unlock()
+    }
+
+    private func needsFull(_ id: Int) -> Bool {
+        fullCache[id] == nil && !fullInFlight.contains(id) && !fullFailed.contains(id)
+    }
+
+    private func workerLoop(turbo: TurboDecoder?) {
+        // the hardware thread leaves 100% to the software threads: they are faster at it (56 against 78 ms)
+        // and it keeps the hardware free for screen images
+        let takesFull = turbo != nil || !hasTurbo
         while true {
             cond.lock()
             var job: (ref: SourceRef, full: Bool, gen: Int)?
             while job == nil {
-                if let f = fullWanted, fullID != f.id, !fullInFlight, !fullFailed.contains(f.id) {
-                    fullInFlight = true
-                    job = (f, true, generation)
+                if takesFull, let f = fullWanted.first, f.urgent, needsFull(f.ref.id) {
+                    fullInFlight.insert(f.ref.id)
+                    job = (f.ref, true, generation)
                 } else if let r = wanted.first(where: { screenCache[$0.id] == nil && !inFlight.contains($0.id) && !failed.contains($0.id) }) {
                     inFlight.insert(r.id)
                     job = (r, false, generation)
+                } else if takesFull, let f = fullWanted.first(where: { needsFull($0.ref.id) }) {
+                    fullInFlight.insert(f.ref.id)
+                    job = (f.ref, true, generation)
                 } else {
                     cond.wait()
                 }
             }
             cond.unlock()
             guard let j = job else { continue }
-            let result = j.full ? ImageDecoder.full(j.ref) : ImageDecoder.screen(j.ref)
+            let result = j.full ? ImageDecoder.full(j.ref, turbo: turbo) : ImageDecoder.screen(j.ref, turbo: turbo)
             cond.lock()
-            if j.full { fullInFlight = false } else { inFlight.remove(j.ref.id) }
+            if j.full { fullInFlight.remove(j.ref.id) } else { inFlight.remove(j.ref.id) }
             let current = j.gen == generation
             if current {
                 if let d = result {
                     if j.full {
-                        if fullWanted?.id == j.ref.id { fullImage = d; fullID = j.ref.id }
+                        fullCache[j.ref.id] = d
+                        fullOrder.removeAll { $0 == j.ref.id }
+                        fullOrder.append(j.ref.id)
+                        evictFullLocked()
                     } else {
                         screenCache[j.ref.id] = d
                         screenOrder.append(j.ref.id)
@@ -289,6 +436,20 @@ final class ImagePipeline {
             } else {
                 screenCache[id] = nil
                 screenOrder.remove(at: i)
+            }
+        }
+    }
+
+    private func evictFullLocked() {
+        let keep = Set(fullWanted.map { $0.ref.id })
+        var i = 0
+        while fullCache.count > fullCapacity && i < fullOrder.count {
+            let id = fullOrder[i]
+            if keep.contains(id) {
+                i += 1
+            } else {
+                fullCache[id] = nil
+                fullOrder.remove(at: i)
             }
         }
     }

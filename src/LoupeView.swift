@@ -93,7 +93,8 @@ final class LoupeView: NSView {
         photoID = p.id
         orientation = p.orientation
         if let d = image {
-            imageLayer.contents = d.image
+            // an IOSurface (libjpeg-turbo) is shown without a copy; screenshots need the CGImage
+            imageLayer.contents = (Snapshot.capturing ? nil : d.surface) ?? d.image
             // thumbnails only know the aspect ratio; keep the last full size if it matches
             if d.isFull || d.fullSize.width >= 2000 || fullSize == .zero || !sameAspect(d.fullSize, fullSize) {
                 fullSize = d.fullSize

@@ -139,11 +139,22 @@ enum Scanner {
         return (d, offset.flatMap(ExifDate.timeZone(from:)))
     }
 
+    /// The XMP inside a JPG, DNG, HEIC or TIFF. Cameras, Lightroom, Photo Mechanic and exiftool put it near
+    /// the start, so the first 256 KB is read (on a network drive that is a tenth of the old 3 MB per file).
+    /// When it is not there, ImageIO looks through the whole file.
     static func embeddedXMP(_ url: URL) -> String? {
-        guard let f = RAFile(url), let d = f.read(0, Int(min(f.size, 3_000_000))) else { return nil }
-        guard let s = d.range(of: Data("<x:xmpmeta".utf8)),
-              let e = d.range(of: Data("</x:xmpmeta>".utf8), in: s.upperBound..<d.endIndex) else { return nil }
-        return String(data: d[s.lowerBound..<e.upperBound], encoding: .utf8)
+        let head = 262_144
+        guard let f = RAFile(url), let d = f.read(0, Int(min(f.size, UInt64(head)))) else { return nil }
+        if let s = d.range(of: Data("<x:xmpmeta".utf8)),
+           let e = d.range(of: Data("</x:xmpmeta>".utf8), in: s.upperBound..<d.endIndex) {
+            return String(data: d[s.lowerBound..<e.upperBound], encoding: .utf8)
+        }
+        guard f.size > UInt64(head),
+              let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let md = CGImageSourceCopyMetadataAtIndex(src, 0, nil),
+              let x = CGImageMetadataCreateXMPData(md, nil) else { return nil }
+        let text = String(data: x as Data, encoding: .utf8)
+        return text?.contains("<x:xmpmeta") == true ? text : nil
     }
 }
 

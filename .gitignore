@@ -4,3 +4,6 @@ AGENTS.md
 *.snelkeus
 *.pitpick
 .DS_Store
+# private analysis notes (Dutch), kept out of the public repo
+docs/analyse-*.md
+docs/concurrentie-*.md

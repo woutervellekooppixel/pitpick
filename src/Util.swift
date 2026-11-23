@@ -64,12 +64,25 @@ enum Orientation {
 
 func nowMs() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000 }
 
-/// Makes a safe file name: no / \ : * ? " < > | and no dot or space at the end.
+/// Makes a safe file name: no / \ : * ? " < > |, no dot or space at the start (a leading dot hides
+/// the file in Finder) or at the end, and at most 200 bytes, so -2 and the extension still fit in 255.
 func safeFileName(_ s: String) -> String {
     let bad = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r\t")
     var out = s.components(separatedBy: bad).joined(separator: "-")
     out = out.trimmingCharacters(in: .whitespaces)
+    while out.hasPrefix(".") || out.hasPrefix(" ") { out.removeFirst() }
     while out.hasSuffix(".") || out.hasSuffix(" ") { out.removeLast() }
+    if out.utf8.count > 200 {
+        var cut = "", bytes = 0
+        for ch in out {
+            let n = String(ch).utf8.count
+            if bytes + n > 200 { break }
+            bytes += n
+            cut.append(ch)
+        }
+        out = cut
+        while out.hasSuffix(".") || out.hasSuffix(" ") || out.hasSuffix("-") || out.hasSuffix("_") { out.removeLast() }
+    }
     return out
 }
 

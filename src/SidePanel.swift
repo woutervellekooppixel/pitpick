@@ -122,7 +122,9 @@ struct SidePanel: View {
     }
 
     private var banner: some View {
-        Text("Read-only folder: view and copy only. Tags are not saved here.")
+        Text(session.lockedVolume
+             ? "Locked card: Pitpick writes nothing on it. Tags, stars and labels stay in Pitpick and go along with the ingest."
+             : "Read-only folder: view and copy only. Tags are not saved here.")
             .font(.system(size: 12))
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -158,7 +160,7 @@ struct SidePanel: View {
                 TextField("yyyy-mm-dd", text: $pad.v.date)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12))
-                    .onSubmit { controller.focusPhotos() }
+                    .onSubmit { pad.normalizeDate(); controller.focusPhotos() }
             }
             VStack(alignment: .leading, spacing: 4) {
                 if anyJobValue {

@@ -76,6 +76,7 @@ final class Controller: NSObject, NSWindowDelegate {
     override init() {
         super.init()
         pipeline.onThumbReady = { [weak self] id in self?.thumbReady(id) }
+        pipeline.onPreviewReady = { [weak self] id in self?.previewReady(id) }
         pipeline.onScreenReady = { [weak self] id in self?.screenReady(id) }
         pipeline.onFullReady = { [weak self] id in self?.screenReady(id) }
         writer.labelNames = { [weak self] in self?.pad.v.labelNames ?? [] }
@@ -174,7 +175,10 @@ final class Controller: NSObject, NSWindowDelegate {
     private func loaded(_ photos: [Photo], roots: [URL], ms: Double) {
         session.setPhotos(photos, roots: roots)
         session.loading = nil
-        session.readOnly = roots.contains { pad.isReadOnly($0.path) }
+        // A locked SD card (or any read-only volume) is treated like a read-only folder: tags stay in
+        // Pitpick and go along with the ingest, instead of an exiftool error for every key press.
+        session.lockedVolume = roots.contains { (try? $0.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly == true }
+        session.readOnly = session.lockedVolume || roots.contains { pad.isReadOnly($0.path) }
         writer.enabled = !session.readOnly
         let firstDay = photos.first.map { $0.shootDate } ?? ""
         pad.open(folderKey: roots.map(\.path).joined(separator: "|"), firstDay: firstDay) {
@@ -190,6 +194,8 @@ final class Controller: NSObject, NSWindowDelegate {
         applyMode()
         updatePrefetch()
         NSDocumentController.shared.noteNewRecentDocumentURL(roots[0])
+        // exiftool ready before the first tag or ingest; not during the first read, which it slowed by ~120 ms
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { ExifTool.shared.warmUp() }
     }
 
     func reopen() {
@@ -248,25 +254,58 @@ final class Controller: NSObject, NSWindowDelegate {
         guard session.mode == .loupe else { return }
         guard let p = session.currentPhoto else { main.loupe.clear(); return }
         let full = main.loupe.zoomed ? pipeline.full(p.id) : nil
-        let best = full ?? pipeline.screen(p.id) ?? pipeline.thumb(p.id)
+        // sharpest first; the PRVW stand-in (1620 px) keeps fast browsing from going black
+        let best = full ?? pipeline.screen(p.id) ?? pipeline.preview(p.id) ?? pipeline.thumb(p.id)
         main.loupe.show(p, image: best)
         if best == nil { pipeline.requestThumbs([p.ref]) }
     }
 
+    private var idleFull: DispatchWorkItem?
+
     func updatePrefetch() {
+        idleFull?.cancel()
+        idleFull = nil
         let v = session.visible
-        guard !v.isEmpty else { pipeline.want([]); pipeline.wantFull(nil); return }
+        guard !v.isEmpty else {
+            pipeline.want([])
+            pipeline.wantFull([])
+            pipeline.requestPreviews([])
+            return
+        }
         let i = session.currentIndex
+        func ref(_ j: Int) -> SourceRef? { j >= 0 && j < v.count ? v[j].ref : nil }
+        // loupe: 7 ahead and 2 behind; grid: only what Return needs at once (a screen image is 45 MB)
+        let ahead = session.mode == .loupe ? 7 : 2, behind = session.mode == .loupe ? 2 : 1
         var refs: [SourceRef] = []
-        func add(_ j: Int) { if j >= 0 && j < v.count { refs.append(v[j].ref) } }
-        add(i)
-        for k in 1...7 { add(i + direction * k) }
-        for k in 1...2 { add(i - direction * k) }
+        refs += [ref(i)].compactMap { $0 }
+        for k in 1...ahead { if let r = ref(i + direction * k) { refs.append(r) } }
+        for k in 1...behind { if let r = ref(i - direction * k) { refs.append(r) } }
         pipeline.want(refs)
-        if session.mode == .loupe && main.loupe.zoomed, let p = session.currentPhoto {
-            pipeline.wantFull(p.ref)
+        guard session.mode == .loupe, let p = session.currentPhoto else {
+            pipeline.requestPreviews([])
+            pipeline.releaseFulls()
+            return
+        }
+        // stand-ins ahead: 12 photos in the browsing direction, 2 behind (about 6 ms each, in software)
+        var previews: [SourceRef] = []
+        for k in 0...12 { if let r = ref(i + direction * k) { previews.append(r) } }
+        for k in 1...2 { if let r = ref(i - direction * k) { previews.append(r) } }
+        pipeline.requestPreviews(previews)
+        if main.loupe.zoomed {
+            // zoomed: this photo first, then the next and the previous one, so a burst can be compared at 100%
+            var full = [FullRequest(ref: p.ref, urgent: true)]
+            if let r = ref(i + direction) { full.append(FullRequest(ref: r, urgent: false)) }
+            if let r = ref(i - direction) { full.append(FullRequest(ref: r, urgent: false)) }
+            pipeline.wantFull(full)
         } else {
-            pipeline.wantFull(nil)
+            pipeline.wantFull([])
+            // still on the same photo after a moment: prepare its 100%, so space or a click shows it at once
+            let item = DispatchWorkItem { [weak self] in
+                guard let self = self, self.session.mode == .loupe, !self.main.loupe.zoomed, self.session.currentPhoto === p else { return }
+                self.pipeline.wantFull([FullRequest(ref: p.ref, urgent: false)])
+            }
+            idleFull = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
         }
     }
 
@@ -277,6 +316,10 @@ final class Controller: NSObject, NSWindowDelegate {
 
     private func thumbReady(_ id: Int) {
         main.grid.redrawThumb(id: id)
+        if session.mode == .loupe, let p = session.currentPhoto, p.id == id, pipeline.screen(id) == nil { showCurrent() }
+    }
+
+    private func previewReady(_ id: Int) {
         if session.mode == .loupe, let p = session.currentPhoto, p.id == id, pipeline.screen(id) == nil { showCurrent() }
     }
 
@@ -367,7 +410,9 @@ final class Controller: NSObject, NSWindowDelegate {
     private func writable(_ what: String) -> Bool {
         if session.busy != nil { return false }
         if session.readOnly {
-            session.message = "This folder is set as read-only, so Pitpick writes nothing here. Copy the selection to another folder first."
+            session.message = session.lockedVolume
+                ? "This card is locked, so Pitpick writes nothing on it. Ingest it first: your tags, stars and labels go along."
+                : "This folder is set as read-only, so Pitpick writes nothing here. Copy the selection to another folder first."
             return false
         }
         if !ExifTool.shared.isAvailable {
@@ -379,6 +424,16 @@ final class Controller: NSObject, NSWindowDelegate {
 
     /// Names must not contain empty fields (a file called "2026-11-19_-_3777" helps nobody).
     private func namesReady(_ templates: [String]) -> Bool {
+        let unknown = pad.v.unknownTokens(in: templates)
+        if !unknown.isEmpty {
+            session.message = "\(unknown.joined(separator: ", ")) is not a known token, so it would end up in the names as it is. Check the spelling under Metadata template; the tokens are listed there."
+            session.openTemplate = true
+            return false
+        }
+        if let problem = pad.v.dateProblem {
+            session.message = problem
+            return false
+        }
         let missing = pad.v.emptyReferences(in: templates)
         if missing.isEmpty { return true }
         var text = "Fill in \(missing.joined(separator: ", ")) first: the names are built from it."
@@ -393,9 +448,17 @@ final class Controller: NSObject, NSWindowDelegate {
 
     /// Metadata that refers to empty fields: ask before writing.
     private func metadataReady() -> Bool {
+        if let problem = pad.v.dateProblem {
+            session.message = problem
+            return false
+        }
         let missing = pad.v.emptyReferences(in: pad.v.writtenTexts)
-        if missing.isEmpty { return true }
-        return confirm("Some fields are empty", "The metadata refers to \(missing.joined(separator: ", ")), which \(missing.count == 1 ? "is" : "are") empty. Write it anyway?", "Write anyway")
+        let unknown = pad.v.unknownTokens(in: pad.v.writtenTexts)
+        if missing.isEmpty && unknown.isEmpty { return true }
+        var text = ""
+        if !missing.isEmpty { text += "The metadata refers to \(missing.joined(separator: ", ")), which \(missing.count == 1 ? "is" : "are") empty. " }
+        if !unknown.isEmpty { text += "\(unknown.joined(separator: ", ")) is not a known token and would be written as it is. " }
+        return confirm(missing.isEmpty ? "Unknown token" : "Some fields are empty", text + "Write anyway?", "Write anyway")
     }
 
     // MARK: metadata and rename
@@ -441,35 +504,57 @@ final class Controller: NSObject, NSWindowDelegate {
         guard !photos.isEmpty else { session.message = session.scopeTagged ? "Nothing tagged yet." : "No photos."; return }
         guard namesReady([pad.v.fileTemplate]) else { return }
         writer.flush(wait: true)
-        // store the camera file name in the XMP first, so {filename} and {frame} keep working afterwards
-        let needOriginal = photos.filter { !$0.hasStoredOriginal }
-        if !needOriginal.isEmpty {
-            let names = pad.v.labelNames
-            let cmds = needOriginal.map { ["-overwrite_original"] + Metadata.stateArgs($0, labelNames: names) + [$0.metadataTarget.path] }
-            let targets = needOriginal.map { $0.metadataTarget }
-            for (i, r) in ExifTool.shared.run(cmds).enumerated() where r.ok {
-                if needOriginal[i].kind != .embedded { needOriginal[i].sidecar = targets[i] }
-                needOriginal[i].hasStoredOriginal = true
-            }
-        }
         let values = pad.v
-        let plan = FileOps.planRename(photos) { p, n in values.fileName(photo: p, seq: n) }
-        guard !plan.items.isEmpty else {
-            session.message = plan.skipped.isEmpty ? "All names are already right." : "Nothing renamed: \(plan.skipped.count) skipped."
+        let labels = values.labelNames
+        let preview = FileOps.planRename(photos) { p, n in values.fileName(photo: p, seq: n) }
+        guard !preview.items.isEmpty else {
+            session.message = preview.skipped.isEmpty ? "All names are already right." : "Nothing renamed: \(preview.skipped.count) skipped."
             return
         }
-        let examples = plan.items.prefix(3).map { "\($0.photo.name)  →  \($0.main.lastPathComponent)" }.joined(separator: "\n")
-        guard confirm("Rename \(plan.items.count) photos?",
+        let examples = preview.items.prefix(3).map { "\($0.photo.name)  →  \($0.main.lastPathComponent)" }.joined(separator: "\n")
+        guard confirm("Rename \(preview.items.count) photos?",
                       examples + "\n\nThe XMP files move along, and you can undo it. Rename before you import into Lightroom.",
                       "Rename") else { return }
-        let result = FileOps.executeRename(plan.items)
-        session.lastRenameLog = result.log
-        session.message = result.errors.isEmpty
-            ? "Renamed \(result.done) photos." + (plan.skipped.isEmpty ? "" : " Skipped \(plan.skipped.count).")
-            : "Renamed \(result.done), problems: \(result.errors.prefix(3).joined(separator: "; "))"
-        main.grid.needsDisplay = true
-        main.loupe.updateInfo()
-        updatePrefetch()
+        // In the background, so the window keeps working. Tags set meanwhile are written afterwards, to the new names.
+        session.busy = "Renaming: 0 / \(preview.items.count)"
+        writer.paused = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // 1. the camera file name into the XMP first, so {filename} and {frame} keep working afterwards
+            let need = photos.filter { !$0.hasStoredOriginal }
+            if !need.isEmpty {
+                let cmds = need.map { ["-overwrite_original"] + Metadata.stateArgs($0, labelNames: labels) + [$0.metadataTarget.path] }
+                let targets = need.map { $0.metadataTarget }
+                let res = ExifTool.shared.run(cmds) { done in
+                    DispatchQueue.main.async { self?.session.busy = "Saving the camera names: \(done) / \(need.count)" }
+                }
+                DispatchQueue.main.sync {
+                    for (i, r) in res.enumerated() where r.ok {
+                        if need[i].kind != .embedded { need[i].sidecar = targets[i] }
+                        need[i].hasStoredOriginal = true
+                    }
+                }
+            }
+            // 2. plan again now every photo has its XMP, then move the files
+            let plan = FileOps.planRename(photos) { p, n in values.fileName(photo: p, seq: n) }
+            let result = FileOps.performRename(plan.items) { done in
+                DispatchQueue.main.async { self?.session.busy = "Renaming: \(done) / \(plan.items.count)" }
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                FileOps.apply(result.updates)
+                self.pipeline.clearFailures()
+                self.writer.paused = false
+                self.writer.flush()
+                self.session.busy = nil
+                self.session.lastRenameLog = result.log
+                self.session.message = result.errors.isEmpty
+                    ? "Renamed \(result.done) photos." + (plan.skipped.isEmpty ? "" : " Skipped \(plan.skipped.count).")
+                    : "Renamed \(result.done), problems: \(result.errors.prefix(3).joined(separator: "; "))"
+                self.main.grid.needsDisplay = true
+                self.main.loupe.updateInfo()
+                self.updatePrefetch()
+            }
+        }
     }
 
     func undoRename() {
@@ -524,16 +609,20 @@ final class Controller: NSObject, NSWindowDelegate {
         }
         let missingMeta = pad.v.emptyReferences(in: pad.v.writtenTexts)
         writer.flush(wait: true)
-        let bytes = sources.reduce(Int64(0)) { sum, p in sum + max(0, FileOps.fileSize(p.url)) + p.companions.reduce(0) { $0 + max(0, FileOps.fileSize($1)) } }
+        let values = pad.v
+        // Only what still has to be copied counts: on a resume the photos that are already there need no space.
+        let plan = FileOps.planIngest(sources, to: dest) { p, n in values.fileName(photo: p, seq: n) }
+        let bytes = plan.reduce(Int64(0)) { $0 + $1.bytes }
+        let already = plan.filter { $0.reuse }.count
         let free = (try? URL(fileURLWithPath: pad.ingestRoot).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage ?? 0
         let gb = { (b: Int64) in String(format: "%.1f GB", Double(b) / 1_000_000_000) }
         if free > 0 && bytes > free {
             session.message = "Not enough space: the photos need \(gb(bytes)), there is \(gb(free)) free."
             return
         }
-        let values = pad.v
         let example = values.fileName(photo: sources.first, seq: 1) + "." + (sources.first?.url.pathExtension.lowercased() ?? "cr3")
         var text = "To \((dest.path as NSString).abbreviatingWithTildeInPath)\n\nNames like:\n\(example)\n\n\(gb(bytes))" + (free > 0 ? " (\(gb(free)) free)." : ".")
+        if already > 0 { text += " \(already) photos are already there and are not copied again." }
         text += " The cards stay untouched. You can start culling while it copies."
         if !missingMeta.isEmpty { text += "\n\nNote: \(missingMeta.joined(separator: ", ")) \(missingMeta.count == 1 ? "is" : "are") empty." }
         guard confirm("Ingest \(sources.count) photos?", text, "Ingest") else { return }
@@ -582,7 +671,11 @@ final class Controller: NSObject, NSWindowDelegate {
         if r.alreadyThere > 0 { msg += " \(r.alreadyThere) were already there." }
         if r.suffixed > 0 { msg += " \(r.suffixed) got -2 because the name was taken." }
         if ingestCancelled { msg += " Stopped before the end." }
-        if !r.errors.isEmpty { msg += " Problems: \(r.errors.prefix(3).joined(separator: "; "))" }
+        if r.diskFull {
+            msg += " Stopped: \(r.errors.first ?? "the destination disk is full.")"
+        } else if !r.errors.isEmpty {
+            msg += " Problems: \(r.errors.prefix(3).joined(separator: "; "))"
+        }
         session.message = msg
         updatePrefetch()
     }

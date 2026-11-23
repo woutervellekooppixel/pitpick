@@ -12,6 +12,9 @@ enum SelfTest {
         if !ok { failures += 1 }
     }
 
+    /// A check that cannot run with these test files (not a failure).
+    static func skip(_ what: String) { print("SKIP  " + what) }
+
     static func exif(_ path: String, _ tags: [String]) -> [String: Any] {
         let r = ExifTool.shared.run([["-j", "-n"] + tags.map { "-" + $0 } + [path]])
         guard let t = r.first?.text, let s = t.firstIndex(of: "["), let d = String(t[s...]).data(using: .utf8),
@@ -48,8 +51,9 @@ enum SelfTest {
         guard let dir = args.first else { print("usage: --selftest <folder with CR3s> [lightroom.xmp] [preset.pitpick]"); return 2 }
         let fm = FileManager.default
         let src = URL(fileURLWithPath: dir)
-        let lrXMP = args.count > 1 && args[1] != "-" ? URL(fileURLWithPath: args[1]) : nil
-        let presetURL = args.count > 2 ? URL(fileURLWithPath: args[2]) : nil
+        // "-" or an empty string: no Lightroom XMP to test with
+        let lrXMP = args.count > 1 && !args[1].isEmpty && args[1] != "-" ? URL(fileURLWithPath: args[1]) : nil
+        let presetURL = args.count > 2 && !args[2].isEmpty && args[2] != "-" ? URL(fileURLWithPath: args[2]) : nil
         print("exiftool: \(ExifTool.locate().map { ([$0.0] + $0.1).joined(separator: " ") } ?? "not found")")
 
         // 1. reading CR3
@@ -64,8 +68,12 @@ enum SelfTest {
         check(infos.allSatisfy { $0 != nil }, "all CR3 files read, \(ms(perFile)) per file")
         check(infos.allSatisfy { ($0?.jpegLength ?? 0) > 1_000_000 && ($0?.prvwLength ?? 0) > 50_000 }, "full JPEG and PRVW found in every file")
         check(infos.allSatisfy { $0?.dateTimeOriginal != nil }, "capture time in every file")
-        let portraitIndex = infos.firstIndex { $0?.orientation == 8 }
-        check(portraitIndex != nil, "portrait photo recognised (orientation 8)")
+        let portraitIndex = infos.firstIndex { Orientation.swapsAxes($0?.orientation ?? 1) }
+        if let i = portraitIndex {
+            check(true, "portrait photo recognised (orientation \(infos[i]?.orientation ?? 0))")
+        } else {
+            skip("no portrait photo in the test folder, so the rotation checks are left out")
+        }
 
         // 2. decoding
         let ref = SourceRef(id: 0, url: files[0], kind: .cr3, cr3: infos[0])
@@ -75,6 +83,22 @@ enum SelfTest {
         check((sc?.image.width ?? 0) >= 4000 && (sc?.fullSize.width ?? 0) >= 8000, "screen image \(sc?.image.width ?? 0)x\(sc?.image.height ?? 0) of \(Int(sc?.fullSize.width ?? 0))x\(Int(sc?.fullSize.height ?? 0)) in \(ms(tSc))")
         t0 = nowMs(); let fu = ImageDecoder.full(ref); let tFu = nowMs() - t0
         check((fu?.image.width ?? 0) >= 8000, "100% image \(fu?.image.width ?? 0)x\(fu?.image.height ?? 0) in \(ms(tFu))")
+
+        // 2b. libjpeg-turbo (Apple Silicon) gives the same picture as the hardware decoder
+        if let t = TurboDecoder() {
+            t0 = nowMs(); let ts = ImageDecoder.screen(ref, turbo: t); let tTs = nowMs() - t0
+            t0 = nowMs(); let tf = ImageDecoder.full(ref, turbo: t); let tTf = nowMs() - t0
+            let diff = (ts?.image).flatMap { a in (sc?.image).map { b in meanDifference(a, b) } } ?? 999
+            // the two decoders round differently (about 1.4/255 at full size, no colour shift); at half size the
+            // software one scales in the DCT and differs about 2/255, which is not visible side by side
+            check(ts?.image.width == sc?.image.width && ts?.image.height == sc?.image.height && ts?.fullSize == sc?.fullSize && diff < 3,
+                  String(format: "software screen image %dx%d in %@, differs %.2f/255 from the hardware one", ts?.image.width ?? 0, ts?.image.height ?? 0, ms(tTs), diff))
+            check(tf?.image.width == fu?.image.width && tf?.isFull == true, "software 100% image \(tf?.image.width ?? 0)x\(tf?.image.height ?? 0) in \(ms(tTf))")
+            let pv = ImageDecoder.preview(ref)
+            check((pv?.image.width ?? 0) >= 1600, "loupe stand-in from the PRVW: \(pv?.image.width ?? 0)x\(pv?.image.height ?? 0)")
+        } else {
+            skip("libjpeg-turbo is not in this build (Intel): the hardware decoder does everything")
+        }
 
         // 3. tokens and templates
         let v = examplePad()
@@ -89,7 +113,12 @@ enum SelfTest {
         var d = examplePad()
         d.fileTemplate = PadValues().fileTemplate
         d.spacesToDashes = true
-        check(d.fileName(photo: camera, seq: 1) == "2025-11-29_21-04-37_Frenna-Ziggo-Dome-Amsterdam_Jane-Doe", "default file name: \(d.fileName(photo: camera, seq: 1))")
+        check(d.fileName(photo: camera, seq: 1) == "2025-11-29_21-04-37_Frenna-Ziggo-Dome-Amsterdam_Jane-Doe_3777", "default file name ends with the frame number: \(d.fileName(photo: camera, seq: 1))")
+        var oldDefault = d
+        oldDefault.fileTemplate = PadValues.oldDefaultFileTemplate
+        if let data = try? JSONEncoder().encode(oldDefault), let back = try? JSONDecoder().decode(PadValues.self, from: data) {
+            check(back.fileTemplate == PadValues.defaultFileTemplate, "the 1.2-1.3 default name moves to the one with the frame number")
+        }
         check(d.folderName == "2025-11-29_Frenna-Ziggo-Dome", "default folder name: \(d.folderName)")
         var dash = d
         dash.values["event"] = "Piano Man - Jeroen van den Boom"
@@ -109,6 +138,20 @@ enum SelfTest {
         old.fileTemplate = "{datum}_{artiest}-{zaal}_{framenr}"
         check(old.fileName(photo: camera, seq: 1) == "2025-11-29_Frenna-Ziggo Dome_3777", "old Dutch tokens still work")
 
+        // 3a. template checks: typos, dates typed by hand, hidden and too long names
+        check(v.unknownTokens(in: ["{shootdate}_{evnt}-{location}_{Photographer}"]) == ["{evnt}"], "unknown token {evnt} is caught, known ones pass")
+        var typed = v
+        typed.date = "29-11-2025"
+        check(typed.isoDate == "2025-11-29" && typed.value("caption").contains("29-11-2025") && typed.folderName.hasPrefix("2025-11-29_"),
+              "date typed as 29-11-2025 is read as 2025-11-29")
+        typed.date = "29-13-2025"
+        check(typed.dateProblem != nil, "an impossible date is caught")
+        check(safeFileName(".Hidden show") == "Hidden show", "a name never starts with a dot (hidden in Finder)")
+        check(safeFileName(String(repeating: "Symphonic Orchestra ", count: 20)).utf8.count <= 200, "names are cut at 200 bytes, so they always fit")
+        var acdc = d
+        acdc.values["event"] = "AC/DC: Live?"
+        check(!acdc.fileName(photo: camera, seq: 1).contains("--"), "no double dashes: \(acdc.fileName(photo: camera, seq: 1))")
+
         // 3b. a personal preset reproduces the names and captions in the photographer's own archive
         if let pu = presetURL, let d = try? Data(contentsOf: pu), let preset = try? JSONDecoder().decode(Pad.Preset.self, from: d) {
             var w = preset.pad
@@ -116,7 +159,7 @@ enum SelfTest {
             check(w.value("headline") == "Frenna at Ziggo Dome Amsterdam", "preset headline equals the archive")
             check(w.value("caption") == "Frenna, Ziggo Dome, Amsterdam, on 29-11-2025. Photo by Wouter Vellekoop", "preset caption equals the archive")
             check(w.list("keywords").joined(separator: "; ") == "concert; live music; stage; lights; music photography; Frenna; Ziggo Dome; Amsterdam; Wouter Vellekoop", "preset keywords equal the archive")
-            check(w.fileName(photo: camera, seq: 1) + ".cr3" == "2025-11-29_21-04-37_Frenna-Ziggo-Dome-Amsterdam_Wouter-Vellekoop.cr3", "preset file name: \(w.fileName(photo: camera, seq: 1))")
+            check(w.fileName(photo: camera, seq: 1) + ".cr3" == "2025-11-29_21-04-37_Frenna-Ziggo-Dome-Amsterdam_Wouter-Vellekoop_3777.cr3", "preset file name: \(w.fileName(photo: camera, seq: 1))")
         }
 
         // working folder with copies under camera names
@@ -138,7 +181,10 @@ enum SelfTest {
         t0 = nowMs()
         var photos = Scanner.load(Scanner.group(Scanner.collectFiles([work.appendingPathComponent("card")]))) { _ in }
         check(photos.count == 3, "card read: \(photos.count) photos in \(ms(nowMs() - t0))")
-        check(photos.first?.orientation == 8, "sorted by capture time (James Arthur 24-11 first)")
+        check(photos.map(\.captureDate) == photos.map(\.captureDate).sorted(), "sorted by capture time")
+        if portraitIndex != nil {
+            check(photos.contains { Orientation.swapsAxes($0.orientation) }, "portrait photo keeps its orientation on the card")
+        }
         guard photos.count == 3 else { return 1 }
         if let dto = CR3.read(photos[0].url)?.dateTimeOriginal {
             let exifStamp = dto.replacingOccurrences(of: ":", with: "-").replacingOccurrences(of: " ", with: "_")
@@ -225,16 +271,17 @@ enum SelfTest {
             check(false, "rename log")
         }
 
-        // 8b. two frames in the same second get -2 with the default name (planned only)
+        // 8b. two frames in the same second: the frame number keeps them apart and in shooting order (planned only)
         let burst = work.appendingPathComponent("burst")
         try? fm.createDirectory(at: burst, withIntermediateDirectories: true)
         try? fm.copyItem(at: files[picks[0]], to: burst.appendingPathComponent("_V1_2001.CR3"))
         try? fm.copyItem(at: files[picks[0]], to: burst.appendingPathComponent("_V1_2002.CR3"))
         let pair = Scanner.load(Scanner.group(Scanner.collectFiles([burst]))) { _ in }
         let burstPlan = FileOps.planRename(pair) { p, n in d.fileName(photo: p, seq: n) }
-        let burstNames = burstPlan.items.map { $0.main.deletingPathExtension().lastPathComponent }.sorted()
-        let stem = pair.first.map { d.fileName(photo: $0, seq: 1) } ?? "?"
-        check(burstNames == [stem, stem + "-2"].sorted(), "same second: \(burstNames.joined(separator: ", "))")
+        let burstNames = burstPlan.items.map { $0.main.lastPathComponent }
+        check(burstNames.count == 2 && burstNames.allSatisfy { !$0.contains("-2.") } && burstNames == burstNames.sorted()
+              && burstNames.first?.hasSuffix("_2001.cr3") == true,
+              "same second, names in shooting order: \(burstNames.joined(separator: ", "))")
 
         // 9. copy with new names and metadata, never overwrite
         photos = Scanner.load(Scanner.group(Scanner.collectFiles([work.appendingPathComponent("card")]))) { _ in }
@@ -285,6 +332,36 @@ enum SelfTest {
             check(cardStamps == cardStampsAfter && cardStampsAfter.count == 3, "cards untouched by the ingest (no XMP written there)")
         }
 
+        // 10b. an interrupted copy never sits under the real name: a leftover temporary file is replaced
+        let resume = work.appendingPathComponent("resume")
+        let one = Scanner.load(Scanner.group(Scanner.collectFiles([work.appendingPathComponent("card")]))) { _ in }
+        if let first = one.first {
+            let planned = FileOps.planIngest([first], to: resume) { p, n in v.fileName(photo: p, seq: n) }
+            try? fm.createDirectory(at: resume, withIntermediateDirectories: true)
+            if let job = planned.first {
+                let partial = resume.appendingPathComponent("." + job.main.lastPathComponent + ".pitpick-partial")
+                try? Data(count: 1000).write(to: partial)   // what a power cut halfway would leave
+                let res = FileOps.ingest([first], to: resume, name: { p, n in v.fileName(photo: p, seq: n) }, metadata: nil,
+                                         cancelled: { false }, onPhoto: { _ in })
+                let left = ((try? fm.contentsOfDirectory(atPath: resume.path)) ?? []).sorted()
+                check(res.copied == 1 && res.suffixed == 0 && left.contains(job.main.lastPathComponent) && !left.contains { $0.hasPrefix(".") || $0.contains("-2.") }
+                      && FileOps.fileSize(job.main) == FileOps.fileSize(first.url),
+                      "resume after a power cut: complete copy under the real name, no -2, no temporary file left (\(left.joined(separator: ", ")))")
+            }
+        }
+
+        // 10c. XMP inside a JPG is found (first 256 KB) and read back
+        if let jpg = ImageDecoder.readJPEG(SourceRef(id: 0, url: files[0], kind: .cr3, cr3: infos[0]), preview: true) {
+            let jdir = work.appendingPathComponent("jpg")
+            try? fm.createDirectory(at: jdir, withIntermediateDirectories: true)
+            let jurl = jdir.appendingPathComponent("IMG_0001.JPG")
+            try? jpg.write(to: jurl)
+            _ = ExifTool.shared.run([["-overwrite_original"] + Metadata.stateArgs(tagged: true, rating: 4, label: .green, original: nil, labelNames: v.labelNames) + [jurl.path]])
+            let back = Scanner.load(Scanner.group(Scanner.collectFiles([jdir]))) { _ in }
+            check(back.first.map { $0.kind == .embedded && $0.tagged && $0.rating == 4 && $0.label == .green } ?? false,
+                  "tag, stars and label read back from inside a JPG")
+        }
+
         // 11. presets survive a round trip
         if let d = try? JSONEncoder().encode(Pad.Preset(pad: v, pinned: ["headline", "caption"], venues: ["Ziggo Dome": "Amsterdam"], readOnly: ["/Volumes/Archive"])),
            let back = try? JSONDecoder().decode(Pad.Preset.self, from: d) {
@@ -299,6 +376,25 @@ enum SelfTest {
         print(failures == 0 ? "\nAll good." : "\n\(failures) failure(s).")
         return failures == 0 ? 0 : 1
     }
+}
+
+/// Mean difference per colour channel (0-255) between two images of the same size, on a 1/8 grid.
+func meanDifference(_ a: CGImage, _ b: CGImage) -> Double {
+    let w = max(1, a.width / 8), h = max(1, a.height / 8)
+    func pixels(_ i: CGImage) -> [UInt8] {
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.interpolationQuality = .none
+        ctx.draw(i, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return buf
+    }
+    let pa = pixels(a), pb = pixels(b)
+    var sum = 0
+    for i in stride(from: 0, to: pa.count, by: 4) {
+        sum += abs(Int(pa[i]) - Int(pb[i])) + abs(Int(pa[i + 1]) - Int(pb[i + 1])) + abs(Int(pa[i + 2]) - Int(pb[i + 2]))
+    }
+    return Double(sum) / Double(w * h * 3)
 }
 
 enum Bench {
@@ -340,7 +436,7 @@ enum Bench {
         while first.contains(where: { pipe.thumb($0.id) == nil }) && nowMs() - t0 < 30000 { usleep(500) }
         print("first \(first.count) thumbnails ready in \(ms(nowMs() - t0))")
 
-        for rate in [4.0, 8.0, 15.0, 25.0] {
+        for rate in [4.0, 8.0, 15.0, 25.0, 40.0] {
             pipe.reset()
             var waits: [Double] = []
             let steps = min(photos.count - 1, 34)
@@ -368,6 +464,8 @@ enum Bench {
 
 enum Snapshot {
     static var active = false
+    /// Screenshots render the layers with CALayer.render(in:), which does not draw IOSurface contents.
+    static var capturing = false
     static var log: [String] = []
 
     static func loadPreset(_ c: Controller, _ path: String) {
@@ -384,6 +482,7 @@ enum Snapshot {
     static func start(_ c: Controller, args: [String]) {
         guard args.count >= 2 else { NSApp.terminate(nil); return }
         active = true
+        capturing = true
         let folder = URL(fileURLWithPath: args[0])
         let out = URL(fileURLWithPath: args[1])
         if args.count > 2 { loadPreset(c, args[2]) }
@@ -438,6 +537,7 @@ enum Snapshot {
     static func startIngest(_ c: Controller, args: [String]) {
         guard args.count >= 4 else { NSApp.terminate(nil); return }
         active = true
+        capturing = true
         let out = URL(fileURLWithPath: args[1])
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         loadPreset(c, args[2])
