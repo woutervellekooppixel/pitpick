@@ -114,6 +114,8 @@ You need macOS 14 or later, on Apple Silicon or Intel. ExifTool is included.
 
 After an update, macOS may ask once more whether Pitpick may read your memory cards. The app is not notarized, so macOS treats every version as a new app.
 
+What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
 Coming from Snelkeus? Pitpick takes over its settings and rename history on the first start.
 
 ## Build from source
